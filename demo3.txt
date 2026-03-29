@@ -1,0 +1,8 @@
+watch -n 1 '
+RAW=$(docker exec market-mysql mysql -umarket_user -pmarket123 -se "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
+QUEUE=$(curl -s -u rabbit_user:rabbit123 http://localhost:15672/api/queues/%2F/etl.staging 2>/dev/null | python3 -c "import sys,json; q=json.load(sys.stdin); print(q.get(\"messages\",0))")
+
+echo "raw_trade  : $RAW records"
+echo "ETL queue  : $QUEUE pending"
+echo "Time       : $(date +"%H:%M:%S")"
+'

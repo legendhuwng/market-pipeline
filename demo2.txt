@@ -1,0 +1,44 @@
+watch -n 1 '
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "           MARKET PIPELINE - LIVE FLOW                "
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Lấy số liệu
+RAW=$(docker exec market-mysql mysql -umarket_user -pmarket123 -se "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
+STG=$(docker exec market-mysql mysql -umarket_user -pmarket123 -se "SELECT COUNT(*) FROM market_staging.stg_trade_1m;" 2>/dev/null)
+FCT=$(docker exec market-mysql mysql -umarket_user -pmarket123 -se "SELECT COUNT(*) FROM market_dw.fact_market_1m;" 2>/dev/null)
+QUEUE=$(curl -s -u rabbit_user:rabbit123 http://localhost:15672/api/queues/%2F/etl.staging 2>/dev/null | python3 -c "import sys,json; q=json.load(sys.stdin); print(q.get(\"messages\",0))")
+RATE=$(curl -s -u rabbit_user:rabbit123 http://localhost:15672/api/queues/%2F/etl.staging 2>/dev/null | python3 -c "import sys,json; q=json.load(sys.stdin); print(abs(round(q.get(\"messages_details\",{}).get(\"rate\",0),1)))")
+
+echo ""
+echo "  [Generator] → sinh event mỗi 500ms = ~2 event/giây"
+echo "       │"
+echo "       ↓ HTTP POST /api/trades"
+echo "  [Ingest]    → validate + push Kafka"
+echo "       │"
+echo "       ↓ Kafka topic: market.trades"
+echo "  [Raw Consumer] → batch insert vào MySQL"
+echo "       │                    │"
+echo "       │                    ↓"
+echo "       │              raw_trade: $RAW records"
+echo "       │"
+echo "       ↓ push job → RabbitMQ etl.staging ($QUEUE pending)"
+echo "  [ETL Worker]   → RAW→STAGING→FACT (~10ms/job)"
+echo "       │"
+echo "       ├──────────────────→ stg_trade_1m : $STG records"
+echo "       │"
+echo "       └──────────────────→ fact_market_1m: $FCT records"
+echo "                                  │"
+echo "                                  ↓ cache.invalidate"
+echo "  [Report API]   → Redis cache + JWT"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+# Lấy 5 record mới nhất từ raw_trade
+echo "  Giao dịch mới nhất:"
+docker exec market-mysql mysql -umarket_user -pmarket123 \
+  -e "SELECT symbol, price, volume, event_time FROM market_raw.raw_trade ORDER BY event_time DESC LIMIT 5;" 2>/dev/null | \
+  sed "s/^/    /"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Refreshed: $(date +"%H:%M:%S") | Ctrl+C to stop"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+'

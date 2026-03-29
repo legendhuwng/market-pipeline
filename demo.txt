@@ -1,0 +1,17 @@
+watch -n 2 '
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "      MARKET PIPELINE - LIVE DATA        "
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+docker exec market-mysql mysql -umarket_user -pmarket123 \
+  -e "SELECT \"raw_trade   \" as table_name, COUNT(*) as records FROM market_raw.raw_trade
+      UNION SELECT \"stg_trade_1m\", COUNT(*) FROM market_staging.stg_trade_1m
+      UNION SELECT \"fact_market \", COUNT(*) FROM market_dw.fact_market_1m;" 2>/dev/null
+echo ""
+echo "Queue etl.staging:"
+curl -s -u rabbit_user:rabbit123 http://localhost:15672/api/queues/%2F/etl.staging 2>/dev/null | \
+  python3 -c "import sys,json; q=json.load(sys.stdin); print(f\"  {q.get(\"messages\",0)} messages pending\")"
+echo ""
+echo "Refreshed: $(date +"%H:%M:%S")"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+'

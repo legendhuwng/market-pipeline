@@ -40,8 +40,8 @@ public class GeneratorController {
     // Thay đổi tốc độ: POST /generator/speed?ms=200
     @PostMapping("/speed")
     public ResponseEntity<String> speed(@RequestParam long ms) {
-        if (ms < 50 || ms > 10000) {
-            return ResponseEntity.badRequest().body("ms phải từ 50 đến 10000");
+        if (ms < 1 || ms > 10000) {
+            return ResponseEntity.badRequest().body("ms phải từ 1 đến 10000");
         }
         service.setIntervalMs(ms);
         return ResponseEntity.ok("Interval set to " + ms + "ms");
