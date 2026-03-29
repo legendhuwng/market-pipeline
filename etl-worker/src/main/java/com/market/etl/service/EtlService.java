@@ -20,26 +20,40 @@ import java.util.List;
 @RequiredArgsConstructor
 public class EtlService {
 
-    private final RawTradeRepository        rawTradeRepo;
-    private final StgTrade1mRepository      stgRepo;
-    private final DimTimeRepository         dimTimeRepo;
-    private final FactMarket1mRepository    factRepo;
+    private final RawTradeRepository         rawTradeRepo;
+    private final StgTrade1mRepository       stgRepo;
+    private final DimTimeRepository          dimTimeRepo;
+    private final FactMarket1mRepository     factRepo;
     private final CacheInvalidationPublisher cachePublisher;
+    private final EtlMetrics                 etlMetrics;
 
     @Transactional
     public void process(StagingJobMessage job) {
+        long start = System.currentTimeMillis();
         log.info("[ETL] Start job={} symbol={} bucket={}",
             job.getJobId(), job.getSymbol(), job.getTimeBucket());
 
+        try {
+            doProcess(job);
+            long duration = System.currentTimeMillis() - start;
+            etlMetrics.recordSuccess(duration);
+            log.info("[ETL] Done job={} symbol={} bucket={} duration={}ms",
+                job.getJobId(), job.getSymbol(), job.getTimeBucket(), duration);
+        } catch (Exception e) {
+            etlMetrics.recordFailure();
+            throw e;
+        }
+    }
+
+    private void doProcess(StagingJobMessage job) {
         LocalDateTime bucket    = LocalDateTime.parse(job.getTimeBucket());
         LocalDateTime bucketEnd = bucket.plusMinutes(1);
 
-        // Stage 1: RAW → STAGING
         List<RawTrade> raws = rawTradeRepo.findBySymbolAndMinute(
             job.getSymbol(), bucket, bucketEnd);
 
         if (raws.isEmpty()) {
-            log.warn("[ETL] No raw data for symbol={} bucket={}", job.getSymbol(), bucket);
+            log.warn("[ETL] No raw data symbol={} bucket={}", job.getSymbol(), bucket);
             return;
         }
 
@@ -50,10 +64,7 @@ public class EtlService {
         long totalVolume = raws.stream().mapToLong(RawTrade::getVolume).sum();
 
         StgTrade1m stg = stgRepo.findBySymbolAndTimeBucket(job.getSymbol(), bucket)
-            .orElse(StgTrade1m.builder()
-                .symbol(job.getSymbol())
-                .timeBucket(bucket)
-                .build());
+            .orElse(StgTrade1m.builder().symbol(job.getSymbol()).timeBucket(bucket).build());
 
         stg.setOpenPrice(open);
         stg.setClosePrice(close);
@@ -63,25 +74,20 @@ public class EtlService {
         stg.setEventCount(raws.size());
         stgRepo.save(stg);
 
-        log.debug("[ETL] Stage1 done: symbol={} count={} vol={}",
-            job.getSymbol(), raws.size(), totalVolume);
+        log.debug("[ETL] Stage1 done: symbol={} count={}", job.getSymbol(), raws.size());
 
-        // Stage 2: STAGING → FACT
-        DimTime dimTime = dimTimeRepo.findByTs(bucket).orElseGet(() -> {
-            DimTime d = DimTime.builder()
+        DimTime dimTime = dimTimeRepo.findByTs(bucket).orElseGet(() ->
+            dimTimeRepo.save(DimTime.builder()
                 .ts(bucket)
                 .minuteOfHour(bucket.getMinute())
                 .hourOfDay(bucket.getHour())
                 .dayOfMonth(bucket.getDayOfMonth())
                 .monthOfYear(bucket.getMonthValue())
                 .year(bucket.getYear())
-                .build();
-            return dimTimeRepo.save(d);
-        });
+                .build()));
 
         if (factRepo.existsBySymbolAndTimeId(job.getSymbol(), dimTime.getTimeId())) {
-            log.debug("[ETL] Fact exists, skip: symbol={} timeId={}",
-                job.getSymbol(), dimTime.getTimeId());
+            log.debug("[ETL] Fact exists, skip symbol={}", job.getSymbol());
             return;
         }
 
@@ -90,25 +96,17 @@ public class EtlService {
             .reduce(BigDecimal.ZERO, BigDecimal::add)
             .divide(BigDecimal.valueOf(raws.size()), 4, RoundingMode.HALF_UP);
 
-        FactMarket1m fact = FactMarket1m.builder()
+        factRepo.save(FactMarket1m.builder()
             .symbol(job.getSymbol())
             .timeId(dimTime.getTimeId())
             .avgPrice(avgPrice)
-            .maxPrice(high)
-            .minPrice(low)
-            .openPrice(open)
-            .closePrice(close)
+            .maxPrice(high).minPrice(low)
+            .openPrice(open).closePrice(close)
             .totalVolume(totalVolume)
             .tradeCount(raws.size())
             .createdAt(LocalDateTime.now())
-            .build();
+            .build());
 
-        factRepo.save(fact);
-
-        // Invalidate cache sau khi fact mới được insert
         cachePublisher.invalidate(job.getSymbol());
-
-        log.info("[ETL] Done job={} symbol={} bucket={} tradeCount={} avgPrice={}",
-            job.getJobId(), job.getSymbol(), bucket, raws.size(), avgPrice);
     }
 }

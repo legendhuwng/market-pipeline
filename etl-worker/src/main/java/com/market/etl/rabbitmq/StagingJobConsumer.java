@@ -2,6 +2,7 @@ package com.market.etl.rabbitmq;
 
 import com.market.etl.model.StagingJobMessage;
 import com.market.etl.service.EtlService;
+import com.market.etl.service.EtlMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -13,7 +14,8 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class StagingJobConsumer {
 
-    private final EtlService etlService;
+    private final EtlService  etlService;
+    private final EtlMetrics  etlMetrics;
 
     @Value("${etl.max-retries:3}")
     private int maxRetries;
@@ -29,25 +31,20 @@ public class StagingJobConsumer {
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 etlService.process(job);
-                return; // thành công → thoát
+                return;
             } catch (Exception e) {
                 lastException = e;
                 log.warn("[ETL Consumer] Attempt {}/{} FAILED job={} err={}",
                     attempt, maxRetries, job.getJobId(), e.getMessage());
                 if (attempt < maxRetries) {
-                    try {
-                        Thread.sleep(retryDelayMs * attempt); // backoff tuyến tính
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    try { Thread.sleep(retryDelayMs * attempt); }
+                    catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
             }
         }
 
-        // Hết retry → ném exception để RabbitMQ đẩy vào DLQ
-        log.error("[ETL Consumer] Job FAILED after {} retries, sending to DLQ. job={}",
+        log.error("[ETL Consumer] Job FAILED after {} retries → DLQ job={}",
             maxRetries, job.getJobId());
-        throw new RuntimeException("ETL failed after retries: " + job.getJobId(), lastException);
+        throw new RuntimeException("ETL failed: " + job.getJobId(), lastException);
     }
 }

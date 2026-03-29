@@ -42,3 +42,12 @@ logging:
   level:
     com.market: DEBUG
     org.springframework.batch: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,etl
+  endpoint:
+    health:
+      show-details: always
