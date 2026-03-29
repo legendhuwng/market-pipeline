@@ -1,0 +1,44 @@
+server:
+  port: 8083
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
+    username: market_user
+    password: market123
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: rabbit_user
+    password: rabbit123
+  batch:
+    job:
+      enabled: false   # tắt auto-run, chạy theo trigger RabbitMQ
+    jdbc:
+      initialize-schema: never
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.batch.BatchAutoConfiguration
+
+# datasource riêng cho Spring Batch metadata (dùng chung MySQL)
+batch:
+  datasource:
+    url: jdbc:mysql://localhost:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
+    username: market_user
+    password: market123
+
+etl:
+  retry-delay-ms: 5000
+  max-retries: 3
+
+logging:
+  level:
+    com.market: DEBUG
+    org.springframework.batch: INFO

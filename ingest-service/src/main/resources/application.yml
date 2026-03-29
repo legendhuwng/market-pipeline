@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      # Đảm bảo không mất message khi broker restart
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+
+kafka:
+  topic:
+    trades: market.trades
+
+logging:
+  level:
+    com.market: DEBUG

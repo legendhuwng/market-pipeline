@@ -1,0 +1,15 @@
+server:
+  port: 8081
+
+generator:
+  ingest-url: http://localhost:8080/api/trades
+  interval-ms: 500        # gửi mỗi 500ms = 2 event/giây
+  enabled: true
+
+# Các symbol chứng khoán giả
+symbols:
+  list: VCB,VNM,HPG,FPT,MSN,TCB,BID,CTG,VIC,GAS
+
+logging:
+  level:
+    com.market: DEBUG

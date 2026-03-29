@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+
+  # ─── MySQL ───────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: market-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: market_raw
+      MYSQL_USER: market_user
+      MYSQL_PASSWORD: market123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./init/mysql:/docker-entrypoint-initdb.d
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Zookeeper (Kafka cần) ────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: market-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - pipeline-net
+
+  # ─── Kafka ───────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: market-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ─── RabbitMQ ─────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: market-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbit_user
+      RABBITMQ_DEFAULT_PASS: rabbit123
+    ports:
+      - "5672:5672"    # AMQP (Spring Boot kết nối)
+      - "15672:15672"  # Management UI
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ───────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: market-redis
+    restart: unless-stopped
+    command: redis-server --requirepass redis123
+    ports:
+      - "6379:6379"
+    networks:
+      - pipeline-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis123", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:
+
+networks:
+  pipeline-net:
+    driver: bridge
