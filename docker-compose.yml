@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
 
-  # ─── MySQL ───────────────────────────────────────────
+  # ─── Infrastructure ──────────────────────────────────
   mysql:
     image: mysql:8.0
     container_name: market-mysql
@@ -25,7 +25,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── Zookeeper (Kafka cần) ────────────────────────────
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: market-zookeeper
@@ -38,7 +37,6 @@ services:
     networks:
       - pipeline-net
 
-  # ─── Kafka ───────────────────────────────────────────
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: market-kafka
@@ -63,7 +61,6 @@ services:
       timeout: 10s
       retries: 5
 
-  # ─── RabbitMQ ─────────────────────────────────────────
   rabbitmq:
     image: rabbitmq:3.12-management
     container_name: market-rabbitmq
@@ -72,8 +69,8 @@ services:
       RABBITMQ_DEFAULT_USER: rabbit_user
       RABBITMQ_DEFAULT_PASS: rabbit123
     ports:
-      - "5672:5672"    # AMQP (Spring Boot kết nối)
-      - "15672:15672"  # Management UI
+      - "5672:5672"
+      - "15672:15672"
     networks:
       - pipeline-net
     healthcheck:
@@ -82,7 +79,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ─── Redis ───────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
     container_name: market-redis
@@ -97,6 +93,128 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ─── Spring Boot Services ────────────────────────────
+  ingest-service:
+    build: ./ingest-service
+    container_name: market-ingest
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
+      SPRING_DATASOURCE_USERNAME: market_user
+      SPRING_DATASOURCE_PASSWORD: market123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - "8080:8080"
+    networks:
+      - pipeline-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  fake-generator:
+    build: ./fake-generator
+    container_name: market-generator
+    restart: unless-stopped
+    environment:
+      GENERATOR_INGEST_URL: http://ingest-service:8080/api/trades
+      GENERATOR_INTERVAL_MS: 500
+      GENERATOR_ENABLED: "true"
+    ports:
+      - "8081:8081"
+    networks:
+      - pipeline-net
+    depends_on:
+      - ingest-service
+
+  raw-consumer:
+    build: ./raw-consumer
+    container_name: market-raw-consumer
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
+      SPRING_DATASOURCE_USERNAME: market_user
+      SPRING_DATASOURCE_PASSWORD: market123
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: rabbit_user
+      SPRING_RABBITMQ_PASSWORD: rabbit123
+    ports:
+      - "8082:8082"
+    networks:
+      - pipeline-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  etl-worker:
+    build: ./etl-worker
+    container_name: market-etl
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
+      SPRING_DATASOURCE_USERNAME: market_user
+      SPRING_DATASOURCE_PASSWORD: market123
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: rabbit_user
+      SPRING_RABBITMQ_PASSWORD: rabbit123
+    ports:
+      - "8084:8083"
+    networks:
+      - pipeline-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  report-service:
+    build: ./report-service
+    container_name: market-report
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_dw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
+      SPRING_DATASOURCE_USERNAME: market_user
+      SPRING_DATASOURCE_PASSWORD: market123
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: redis123
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: rabbit_user
+      SPRING_RABBITMQ_PASSWORD: rabbit123
+    ports:
+      - "8085:8085"
+    networks:
+      - pipeline-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: market-phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: market_user
+      PMA_PASSWORD: market123
+    ports:
+      - "8888:80"
+    networks:
+      - pipeline-net
+    depends_on:
+      mysql:
+        condition: service_healthy
+
 
 volumes:
   mysql_data:

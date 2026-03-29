@@ -1,0 +1,15 @@
+# 1. Dừng và xóa toàn bộ container + volume
+docker compose down -v
+
+# 2. Xóa Kafka data (nếu có volume riêng)
+docker volume prune -f
+
+# 3. Kiểm tra không còn gì
+docker compose ps
+docker volume ls | grep market
+
+# Chạy lại toàn bộ (MySQL sẽ tự chạy init SQL tạo lại schema + seed dim_symbol)
+docker compose up -d --build
+
+# Xem log để chắc tất cả start ok
+docker compose logs -f --tail=20
