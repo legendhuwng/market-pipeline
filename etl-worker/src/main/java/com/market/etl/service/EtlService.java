@@ -2,6 +2,7 @@ package com.market.etl.service;
 
 import com.market.etl.entity.*;
 import com.market.etl.model.StagingJobMessage;
+import com.market.etl.rabbitmq.CacheInvalidationPublisher;
 import com.market.etl.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,25 +20,21 @@ import java.util.List;
 @RequiredArgsConstructor
 public class EtlService {
 
-    private final RawTradeRepository     rawTradeRepo;
-    private final StgTrade1mRepository   stgRepo;
-    private final DimTimeRepository      dimTimeRepo;
-    private final FactMarket1mRepository factRepo;
+    private final RawTradeRepository        rawTradeRepo;
+    private final StgTrade1mRepository      stgRepo;
+    private final DimTimeRepository         dimTimeRepo;
+    private final FactMarket1mRepository    factRepo;
+    private final CacheInvalidationPublisher cachePublisher;
 
-    /**
-     * 1 job = 1 transaction
-     * Stage 1: RAW → STAGING
-     * Stage 2: STAGING → FACT
-     */
     @Transactional
     public void process(StagingJobMessage job) {
         log.info("[ETL] Start job={} symbol={} bucket={}",
             job.getJobId(), job.getSymbol(), job.getTimeBucket());
 
-        LocalDateTime bucket = LocalDateTime.parse(job.getTimeBucket());
+        LocalDateTime bucket    = LocalDateTime.parse(job.getTimeBucket());
         LocalDateTime bucketEnd = bucket.plusMinutes(1);
 
-        // ── Stage 1: RAW → STAGING ─────────────────────────────
+        // Stage 1: RAW → STAGING
         List<RawTrade> raws = rawTradeRepo.findBySymbolAndMinute(
             job.getSymbol(), bucket, bucketEnd);
 
@@ -46,14 +43,12 @@ public class EtlService {
             return;
         }
 
-        // Aggregate
         BigDecimal open  = raws.get(0).getPrice();
         BigDecimal close = raws.get(raws.size() - 1).getPrice();
         BigDecimal high  = raws.stream().map(RawTrade::getPrice).max(Comparator.naturalOrder()).orElse(open);
         BigDecimal low   = raws.stream().map(RawTrade::getPrice).min(Comparator.naturalOrder()).orElse(open);
         long totalVolume = raws.stream().mapToLong(RawTrade::getVolume).sum();
 
-        // Upsert staging
         StgTrade1m stg = stgRepo.findBySymbolAndTimeBucket(job.getSymbol(), bucket)
             .orElse(StgTrade1m.builder()
                 .symbol(job.getSymbol())
@@ -68,10 +63,10 @@ public class EtlService {
         stg.setEventCount(raws.size());
         stgRepo.save(stg);
 
-        log.debug("[ETL] Stage1 done: symbol={} count={} vol={}", job.getSymbol(), raws.size(), totalVolume);
+        log.debug("[ETL] Stage1 done: symbol={} count={} vol={}",
+            job.getSymbol(), raws.size(), totalVolume);
 
-        // ── Stage 2: STAGING → FACT ────────────────────────────
-        // Upsert dim_time
+        // Stage 2: STAGING → FACT
         DimTime dimTime = dimTimeRepo.findByTs(bucket).orElseGet(() -> {
             DimTime d = DimTime.builder()
                 .ts(bucket)
@@ -84,14 +79,12 @@ public class EtlService {
             return dimTimeRepo.save(d);
         });
 
-        // Skip nếu fact đã tồn tại
         if (factRepo.existsBySymbolAndTimeId(job.getSymbol(), dimTime.getTimeId())) {
-            log.debug("[ETL] Fact already exists, skip: symbol={} timeId={}",
+            log.debug("[ETL] Fact exists, skip: symbol={} timeId={}",
                 job.getSymbol(), dimTime.getTimeId());
             return;
         }
 
-        // Tính avg
         BigDecimal avgPrice = raws.stream()
             .map(RawTrade::getPrice)
             .reduce(BigDecimal.ZERO, BigDecimal::add)
@@ -111,6 +104,9 @@ public class EtlService {
             .build();
 
         factRepo.save(fact);
+
+        // Invalidate cache sau khi fact mới được insert
+        cachePublisher.invalidate(job.getSymbol());
 
         log.info("[ETL] Done job={} symbol={} bucket={} tradeCount={} avgPrice={}",
             job.getJobId(), job.getSymbol(), bucket, raws.size(), avgPrice);

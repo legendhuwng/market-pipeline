@@ -1,0 +1,15 @@
+TOKEN=$(curl -s -X POST http://localhost:8085/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user","password":"user123"}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+# Lần 1 – cache HIT (nhanh, từ Redis)
+time curl -s "http://localhost:8085/api/stocks?symbol=VCB&size=5" \
+  -H "Authorization: Bearer $TOKEN" > /dev/null
+
+# Xóa cache thủ công
+docker exec market-redis redis-cli -a redis123 del "stock:VCB:1m"
+
+# Lần 2 – cache MISS (chậm hơn, từ DB)
+time curl -s "http://localhost:8085/api/stocks?symbol=VCB&size=5" \
+  -H "Authorization: Bearer $TOKEN" > /dev/null

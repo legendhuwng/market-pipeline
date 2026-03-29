@@ -50,4 +50,11 @@ public class RabbitMQConfig {
         factory.setDefaultRequeueRejected(false);
         return factory;
     }
+
+@Bean
+public Queue cacheInvalidateQueue() {
+    return QueueBuilder.durable("cache.invalidate").build();
 }
+
+}
+// Thêm method này vào class RabbitMQConfig

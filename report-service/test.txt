@@ -1,0 +1,26 @@
+# 1. Login lấy token
+TOKEN=$(curl -s -X POST http://localhost:8085/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user","password":"user123"}' | \
+  python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+echo "Token: $TOKEN"
+
+# 2. Lấy danh sách symbol
+curl -s http://localhost:8085/api/stocks/symbols \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 3. Query có pagination
+curl -s "http://localhost:8085/api/stocks?page=0&size=5" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 4. Filter theo symbol
+curl -s "http://localhost:8085/api/stocks?symbol=VCB&size=3" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 5. Filter theo price range
+curl -s "http://localhost:8085/api/stocks?symbol=FPT&minPrice=100&maxPrice=130&size=5" \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
+
+# 6. Mở Swagger UI trong trình duyệt Windows
+# http://localhost:8085/swagger-ui.html

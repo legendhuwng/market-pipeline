@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Table(name = "market_staging.stg_trade_1m")
+@Table(name = "stg_trade_1m", catalog = "market_staging")
 public class StgTrade1m {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

@@ -1,15 +1,12 @@
-package com.market.etl.entity;
+package com.market.report.entity;
 
 import jakarta.persistence.*;
-import lombok.*;
+import lombok.Data;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Data
 @Entity
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
 @Table(name = "fact_market_1m", catalog = "market_dw")
 public class FactMarket1m {
     @Id

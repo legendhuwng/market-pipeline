@@ -1,14 +1,11 @@
-package com.market.etl.entity;
+package com.market.report.entity;
 
 import jakarta.persistence.*;
-import lombok.*;
+import lombok.Data;
 import java.time.LocalDateTime;
 
 @Data
 @Entity
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
 @Table(name = "dim_time", catalog = "market_dw")
 public class DimTime {
     @Id
