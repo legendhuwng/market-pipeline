@@ -1,0 +1,280 @@
+🧠 KIẾN TRÚC FINAL (DW-READY – PRODUCTION+)
+Fake Generator
+      ↓
+Ingest Service (Java 17)
+      ↓
+Kafka (Raw Event Stream)
+      ↓
+Raw Consumer (Batch Processing)
+      ↓
+MySQL (RAW LAYER)
+      ↓
+RabbitMQ (ETL JOB ORCHESTRATION)
+      ↓
+ETL Worker (Spring Batch – Multi-stage + Transaction)
+      ↓
+MySQL (STAGING → DATA WAREHOUSE – Star Schema)
+      ↓
+Redis (Cache + Preload + Invalidation)
+      ↓
+Report Service (REST API + JWT + Pagination + Filter + OpenAPI)
+🎯 TRIẾT LÝ THIẾT KẾ (FINAL)
+🔥 Kafka → DATA PIPELINE
+ingest throughput cao
+immutable event
+replay được
+🔥 RabbitMQ → ORCHESTRATION CORE (RẤT QUAN TRỌNG)
+chia ETL thành nhiều stage
+điều phối workflow
+retry / delay / DLQ
+trigger theo batch (minute bucket)
+🧠 Data Warehouse → ANALYTICS LAYER
+chuẩn Star Schema
+tối ưu BI query
+tách hoàn toàn khỏi raw
+🚀 DATA LAYER DESIGN (CHUẨN DW)
+🧱 1. RAW LAYER
+raw_trade
+---------
+event_id (PK)
+symbol
+price
+volume
+event_time
+created_at
+
+INDEX idx_symbol_time (symbol, event_time)
+
+👉 lưu 100% data gốc – immutable
+
+🧪 2. STAGING LAYER
+stg_trade_1m
+------------
+symbol
+time_bucket
+price
+volume
+event_count
+
+UNIQUE(symbol, time_bucket)
+
+👉 nhiệm vụ:
+
+clean data
+reduce load cho DW
+🌟 3. DATA WAREHOUSE (STAR SCHEMA)
+📌 DIM TABLES
+dim_symbol
+----------
+symbol (PK)
+company_name
+sector
+exchange
+dim_time
+--------
+time_id (PK)
+timestamp
+minute
+hour
+day
+month
+year
+📊 FACT TABLE
+fact_market_1m
+--------------
+id (PK)
+symbol (FK)
+time_id (FK)
+
+avg_price
+max_price
+min_price
+total_volume
+trade_count
+
+INDEX idx_symbol_timeid (symbol, time_id)
+UNIQUE(symbol, time_id)
+🚀 ETL PIPELINE (SPRING BATCH + RABBITMQ)
+⚙️ FLOW
+RAW → STAGING → FACT
+🚀 PHASE 3 – RAW → RABBITMQ
+Job types
+1. STAGING JOB
+
+Queue: etl.staging
+
+{
+  "jobId": "uuid",
+  "type": "BUILD_STAGING_1M",
+  "symbol": "VCB",
+  "timeBucket": "2026-03-29T14:45:00"
+}
+2. FACT JOB
+
+Queue: etl.fact
+
+🚀 PHASE 4 – ETL WORKER (SPRING BATCH CORE)
+🧩 Stage 1: RAW → STAGING
+Reader: MySQL (raw_trade)
+Processor: group by minute
+Writer: stg_trade_1m
+chunk(500)
+🧩 Stage 2: STAGING → FACT
+Reader: stg_trade_1m
+Processor: aggregate
+Writer: fact_market_1m
+🔒 TRANSACTION BOUNDARY (CỰC QUAN TRỌNG)
+Rule:
+
+👉 1 job = 1 transaction
+
+@Transactional
+public void processStagingJob() {
+    writeStaging();
+    publishFactJob();
+}
+💥 Đảm bảo:
+không mất job
+không double data
+retry an toàn
+🔁 RETRY + DLQ (RABBITMQ)
+
+Queues:
+
+etl.staging
+etl.staging.retry
+etl.staging.dlq
+
+etl.fact
+etl.fact.retry
+etl.fact.dlq
+
+cache.invalidate
+
+Flow:
+
+fail → retry (delay) → fail → DLQ
+🚀 RAW CONSUMER (BATCH PROCESSING)
+@KafkaListener(...)
+public void consume(List<Event> events) {
+    saveBatch(events);
+}
+Batch size:
+100–500 records
+🚀 REPORT SERVICE (ENTERPRISE LEVEL)
+🔐 JWT AUTH
+POST /auth/login
+GET /stocks (Bearer token)
+Stateless
+Role-based (USER / ADMIN)
+📄 PAGINATION
+GET /stocks?page=0&size=20&sort=time,desc
+🔍 FILTER NÂNG CAO
+GET /stocks?symbol=VCB&from=...&to=...&minPrice=50&maxPrice=70
+
+👉 dùng:
+
+JPA Specification / QueryDSL
+📘 OpenAPI (Swagger)
+/swagger-ui.html
+
+👉 auto document API
+
+⚡ REDIS (PRODUCTION PATTERN)
+🧠 CACHE ASIDE
+
+Key:
+
+stock:{symbol}:1m
+
+TTL:
+
+30–60s
+🔄 CACHE INVALIDATION (QUAN TRỌNG)
+
+Sau khi ETL FACT xong:
+
+publish → cache.invalidate
+
+→ Report service:
+
+redis.delete(key);
+🚀 PRELOAD CACHE
+@EventListener(ApplicationReadyEvent.class)
+public void preload() {
+    loadHotData();
+}
+📊 DATABASE TUNING
+🔍 EXPLAIN QUERY
+EXPLAIN SELECT ...
+
+Bạn phải hiểu:
+
+index scan vs full scan
+rows examined
+📈 OBSERVABILITY (PHẢI CÓ)
+📌 STRUCTURED LOG
+{
+  "service": "etl-worker",
+  "jobId": "123",
+  "status": "SUCCESS",
+  "duration": 120
+}
+📊 METRICS
+1. ETL TIME
+thời gian mỗi job
+2. JOB SUCCESS RATE
+success / total
+📉 MONITOR
+Kafka lag
+Rabbit queue depth
+ETL duration
+🚀 PHASE PLAN (FINAL)
+PHASE 0 – Setup
+Docker: MySQL, Kafka, RabbitMQ, Redis
+Run full system
+PHASE 1 – Fake Generator
+simulate market data
+controllable load
+PHASE 2 – Ingest Service
+validate
+push Kafka
+PHASE 3 – Raw Consumer
+batch insert
+push staging job
+PHASE 4 – ETL Worker
+Spring Batch
+multi-stage ETL
+transaction boundary
+PHASE 5 – Data Warehouse
+build dim + fact
+index tuning
+PHASE 6 – Report Service
+JWT auth
+pagination + filter
+OpenAPI
+PHASE 7 – Cache
+Redis
+preload + invalidation
+PHASE 8 – Job Control
+tracking job
+reprocess DLQ
+PHASE 9 – Observability + Scale
+metrics
+log structured
+scale consumer
+🔥 KẾT LUẬN
+
+Plan này giờ đã đạt:
+
+✅ REST API (chuẩn production)
+✅ Java 17 + Spring Boot
+✅ Spring Security (JWT)
+✅ Redis caching (advanced)
+✅ RabbitMQ orchestration (multi-stage ETL)
+✅ Kafka streaming
+✅ MySQL + Data Warehouse (Star Schema)
+✅ ETL với Spring Batch
+✅ Transaction boundary rõ ràng
+✅ Pagination + Filter + OpenAPI
+✅ Observability + Performance tuning

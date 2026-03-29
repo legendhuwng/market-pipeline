@@ -1,0 +1,18 @@
+echo "=== PIPELINE STATUS ===" && \
+echo "--- MySQL ---" && \
+docker exec market-mysql mysql -umarket_user -pmarket123 \
+  -e "SELECT 'raw_trade' as tbl, COUNT(*) as cnt FROM market_raw.raw_trade
+      UNION SELECT 'stg_trade_1m', COUNT(*) FROM market_staging.stg_trade_1m
+      UNION SELECT 'fact_market_1m', COUNT(*) FROM market_dw.fact_market_1m;" && \
+echo "--- RabbitMQ ---" && \
+curl -s -u rabbit_user:rabbit123 http://localhost:15672/api/queues | \
+  python3 -c "
+import sys,json
+qs=json.load(sys.stdin)
+for q in qs:
+    print(f'  {q[\"name\"]}: {q.get(\"messages\",0)} messages')
+" && \
+echo "--- Redis ---" && \
+docker exec market-redis redis-cli -a redis123 --no-auth-warning keys "stock:*" && \
+echo "--- ETL Metrics ---" && \
+curl -s http://localhost:8084/actuator/etl
