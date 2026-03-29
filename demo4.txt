@@ -1,0 +1,15 @@
+sleep 5
+for MS in 500 200 100 50 1; do
+  curl -s -X POST "http://localhost:8081/generator/speed?ms=$MS" > /dev/null
+  sleep 2
+  BEFORE=$(docker exec market-mysql mysql -umarket_user -pmarket123 \
+    -se "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
+  sleep 10
+  AFTER=$(docker exec market-mysql mysql -umarket_user -pmarket123 \
+    -se "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
+  RATE=$((($AFTER - $BEFORE) / 10))
+  QUEUE=$(curl -s -u rabbit_user:rabbit123 \
+    http://localhost:15672/api/queues/%2F/etl.staging 2>/dev/null | \
+    python3 -c "import sys,json; q=json.load(sys.stdin); print(q.get('messages',0))")
+  echo "interval=${MS}ms → ${RATE} rec/s | ETL pending: ${QUEUE}"
+done
