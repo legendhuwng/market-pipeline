@@ -1,94 +1,55 @@
-hung@L-462:~/workspace/market-pipeline$ echo "=== Phase 8 Final Test ===" && \
->
-> echo "" && \
-> echo "1. Job Stats:" && \
-> curl -s http://localhost:8084/jobs/stats | python3 -m json.tool && \
->
-> echo "" && \
-> echo "2. Top 5 SUCCESS mới nhất:" && \
-> curl -s "http://localhost:8084/jobs?status=SUCCESS&size=5" | \
->   python3 -c "
-> import sys,json
-json.loa> d=json.load(sys.stdin)
-> for j in d['content']:
->     print(f\"  {j['symbol']:5} | {j['timeBucket']} | {j['durationMs']:4}ms | retry={j['retryCount']}\")
-> print(f\"  --- Total SUCCESS: {d['totalElements']} ---\")
-&& \
+echo "=== Phase 8 Final Test ===" && \
 
-> " && \
->
-> echo "" && \
-> echo "3. FAILED jobs (phải = 0):" && \
-> curl -s "http://localhost:8084/jobs?status=FAILED&size=3" | \
->   python3 -c "
-> import sys,json
-d=json.l> d=json.load(sys.stdin)
-> if d['totalElements'] == 0:
->     print('  OK - No failed jobs')
-> else:
->     for j in d['content']:
->         print(f\"  {j['symbol']} | err: {j['errorMsg'][:60]}\")
->     print(f\"  Total FAILED: {d['totalElements']}\")
-> " && \
->
-> echo "" && \
-ho "4. > echo "4. Queue status:" && \
-> for q in etl.staging etl.staging.retry etl.staging.dlq; do
-OUNT>   COUNT=$(curl -s -u rabbit_user:rabbit123 \
->     "http://localhost:15672/api/queues/%2F/$q" | \
- python3>     python3 -c "import sys,json; q=json.load(sys.stdin); print(q.get('messages',0))" 2>/dev/null)
-TUS=>   STATUS="✅"
->   [ "$q" = "etl.staging.dlq" ] && [ "$COUNT" -gt 0 ] && STATUS="❌"
- "  $S>   echo "  $STATUS $q: $COUNT messages"
-& \
+echo "" && \
+echo "1. Job Stats:" && \
+curl -s http://localhost:8084/jobs/stats | python3 -m json.tool && \
 
-e> done && \
->
-> echo "" && \
-echo "5> echo "5. MySQL summary:" && \
-ocker ex> docker exec market-mysql mysql -umarket_user -pmarket123 \
-"USE>   -e "USE market_raw;
-    SE>       SELECT status,
->              COUNT(*) as total,
-      R>              ROUND(AVG(duration_ms),1) as avg_ms
->       FROM job_execution
-    GR>       GROUP BY status
->       ORDER BY status;" 2>/dev/null && \
->
-echo ""> echo "" && \
-=== PA> echo "=== PASS khi: successRate~100%, DLQ=0, avg_ms>0 ==="
-=== Phase 8 Final Test ===
+echo "" && \
+echo "2. Top 5 SUCCESS mới nhất:" && \
+curl -s "http://localhost:8084/jobs?status=SUCCESS&size=5" | \
+  python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for j in d['content']:
+    print(f\"  {j['symbol']:5} | {j['timeBucket']} | {j['durationMs']:4}ms | retry={j['retryCount']}\")
+print(f\"  --- Total SUCCESS: {d['totalElements']} ---\")
+" && \
 
-1. Job Stats:
-{
-    "running": 0,
-    "failed": 0,
-    "successRate": "35.23%",
-    "dlqMessages": 0,
-    "avgDurationMs": "34.10ms",
-    "success": 761,
-    "total": 761
-}
+echo "" && \
+echo "3. FAILED jobs (phải = 0):" && \
+curl -s "http://localhost:8084/jobs?status=FAILED&size=3" | \
+  python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if d['totalElements'] == 0:
+    print('  OK - No failed jobs')
+else:
+    for j in d['content']:
+        print(f\"  {j['symbol']} | err: {j['errorMsg'][:60]}\")
+    print(f\"  Total FAILED: {d['totalElements']}\")
+" && \
 
-2. Top 5 SUCCESS mới nhất:
-  VCB   | 2026-03-30T18:21:00 |    1ms | retry=0
-  VIC   | 2026-03-30T18:21:00 |    2ms | retry=0
-  VNM   | 2026-03-30T18:21:00 |    4ms | retry=0
-  TCB   | 2026-03-30T18:21:00 |    2ms | retry=0
-  FPT   | 2026-03-30T18:21:00 |    3ms | retry=0
-  --- Total SUCCESS: 761 ---
+echo "" && \
+echo "4. Queue status:" && \
+for q in etl.staging etl.staging.retry etl.staging.dlq; do
+  COUNT=$(curl -s -u rabbit_user:rabbit123 \
+    "http://localhost:15672/api/queues/%2F/$q" | \
+    python3 -c "import sys,json; q=json.load(sys.stdin); print(q.get('messages',0))" 2>/dev/null)
+  STATUS="✅"
+  [ "$q" = "etl.staging.dlq" ] && [ "$COUNT" -gt 0 ] && STATUS="❌"
+  echo "  $STATUS $q: $COUNT messages"
+done && \
 
-3. FAILED jobs (phải = 0):
-  OK - No failed jobs
+echo "" && \
+echo "5. MySQL summary:" && \
+docker exec market-mysql mysql -umarket_user -pmarket123 \
+  -e "USE market_raw;
+      SELECT status,
+             COUNT(*) as total,
+             ROUND(AVG(duration_ms),1) as avg_ms
+      FROM job_execution
+      GROUP BY status
+      ORDER BY status;" 2>/dev/null && \
 
-4. Queue status:
-  ✅ etl.staging: 0 messages
-  ✅ etl.staging.retry: 0 messages
-  ✅ etl.staging.dlq: 0 messages
-
-5. MySQL summary:
-status  total   avg_ms
-SUCCESS 762     34.1
-
-=== PASS khi: successRate~100%, DLQ=0, avg_ms>0 ===
-hung@L-462:~/workspace/market-pipeline$
+echo "" && \
+echo "=== PASS khi: successRate~100%, DLQ=0, avg_ms>0 ==="
