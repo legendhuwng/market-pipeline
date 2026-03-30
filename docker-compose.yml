@@ -165,7 +165,7 @@ services:
       SPRING_RABBITMQ_USERNAME: rabbit_user
       SPRING_RABBITMQ_PASSWORD: rabbit123
     ports:
-      - "8084:8083"
+      - "8084:8084"
     networks:
       - pipeline-net
     depends_on:

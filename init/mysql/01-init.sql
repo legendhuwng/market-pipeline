@@ -90,3 +90,10 @@ INSERT IGNORE INTO dim_symbol (symbol, company_name, sector, exchange) VALUES
 ('HPG',  'Hoa Phat Group',    'Steel',      'HOSE'),
 ('FPT',  'FPT Corporation',   'Technology', 'HOSE'),
 ('MSN',  'Masan Group',       'Consumer',   'HOSE');
+-- Bổ sung 5 symbol còn thiếu
+INSERT IGNORE INTO market_dw.dim_symbol (symbol, company_name, sector, exchange) VALUES
+('TCB', 'Techcombank',      'Banking',     'HOSE'),
+('BID', 'BIDV',             'Banking',     'HOSE'),
+('CTG', 'VietinBank',       'Banking',     'HOSE'),
+('VIC', 'Vingroup',         'Real Estate', 'HOSE'),
+('GAS', 'PetroVietnam Gas', 'Energy',      'HOSE');

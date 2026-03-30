@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class RabbitMQConfig {
 
+    // ── Main queue ────────────────────────────────────────
     @Bean
     public Queue stagingQueue() {
         return QueueBuilder.durable("etl.staging")
@@ -19,11 +20,29 @@ public class RabbitMQConfig {
             .build();
     }
 
+    // ── Retry queue – TTL 10s rồi re-enqueue vào main ────
+    @Bean
+    public Queue stagingRetryQueue() {
+        return QueueBuilder.durable("etl.staging.retry")
+            .withArgument("x-message-ttl", 10000)                  // chờ 10 giây
+            .withArgument("x-dead-letter-exchange", "")
+            .withArgument("x-dead-letter-routing-key", "etl.staging") // → về main queue
+            .build();
+    }
+
+    // ── DLQ – message nằm đây sau khi hết retry ──────────
     @Bean
     public Queue stagingDlq() {
         return QueueBuilder.durable("etl.staging.dlq").build();
     }
 
+    // ── Cache invalidation queue ──────────────────────────
+    @Bean
+    public Queue cacheInvalidateQueue() {
+        return QueueBuilder.durable("cache.invalidate").build();
+    }
+
+    // ── Converter & Template ──────────────────────────────
     @Bean
     @SuppressWarnings("deprecation")
     public Jackson2JsonMessageConverter messageConverter() {
@@ -37,6 +56,7 @@ public class RabbitMQConfig {
         return t;
     }
 
+    // ── Listener factory ──────────────────────────────────
     @Bean
     @SuppressWarnings("deprecation")
     public SimpleRabbitListenerContainerFactory rabbitListenerContainerFactory(
@@ -46,15 +66,7 @@ public class RabbitMQConfig {
         factory.setMessageConverter(messageConverter());
         factory.setConcurrentConsumers(2);
         factory.setMaxConcurrentConsumers(5);
-        // defaultRequeueRejected=false → fail sẽ vào DLQ thay vì requeue vô hạn
-        factory.setDefaultRequeueRejected(false);
+        factory.setDefaultRequeueRejected(false); // fail → DLQ, không requeue vô hạn
         return factory;
     }
-
-@Bean
-public Queue cacheInvalidateQueue() {
-    return QueueBuilder.durable("cache.invalidate").build();
 }
-
-}
-// Thêm method này vào class RabbitMQConfig

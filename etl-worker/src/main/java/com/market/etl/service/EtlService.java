@@ -27,18 +27,18 @@ public class EtlService {
     private final CacheInvalidationPublisher cachePublisher;
     private final EtlMetrics                 etlMetrics;
 
+    // Trả về duration để consumer tự track
     @Transactional
-    public void process(StagingJobMessage job) {
+    public long process(StagingJobMessage job) {
         long start = System.currentTimeMillis();
-        log.info("[ETL] Start job={} symbol={} bucket={}",
-            job.getJobId(), job.getSymbol(), job.getTimeBucket());
 
         try {
             doProcess(job);
             long duration = System.currentTimeMillis() - start;
             etlMetrics.recordSuccess(duration);
-            log.info("[ETL] Done job={} symbol={} bucket={} duration={}ms",
-                job.getJobId(), job.getSymbol(), job.getTimeBucket(), duration);
+            log.info("[ETL] Done job={} symbol={} duration={}ms",
+                job.getJobId(), job.getSymbol(), duration);
+            return duration;
         } catch (Exception e) {
             etlMetrics.recordFailure();
             throw e;
@@ -73,8 +73,6 @@ public class EtlService {
         stg.setTotalVolume(totalVolume);
         stg.setEventCount(raws.size());
         stgRepo.save(stg);
-
-        log.debug("[ETL] Stage1 done: symbol={} count={}", job.getSymbol(), raws.size());
 
         DimTime dimTime = dimTimeRepo.findByTs(bucket).orElseGet(() ->
             dimTimeRepo.save(DimTime.builder()
