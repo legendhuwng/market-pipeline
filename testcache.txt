@@ -1,0 +1,5 @@
+for i in 1 2; do
+  echo "=== Request $i ==="
+  time curl -s "http://localhost:8085/api/stocks?symbol=VCB&page=0&size=5" \
+    -H "Authorization: Bearer $TOKEN" > /dev/null
+done

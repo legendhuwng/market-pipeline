@@ -97,3 +97,24 @@ INSERT IGNORE INTO market_dw.dim_symbol (symbol, company_name, sector, exchange)
 ('CTG', 'VietinBank',       'Banking',     'HOSE'),
 ('VIC', 'Vingroup',         'Real Estate', 'HOSE'),
 ('GAS', 'PetroVietnam Gas', 'Energy',      'HOSE');
+
+-- ── JOB TRACKING ───────────────────────────────────────
+USE market_raw;
+
+CREATE TABLE IF NOT EXISTS job_execution (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    job_id      VARCHAR(36)  NOT NULL,
+    job_type    VARCHAR(50)  NOT NULL,
+    symbol      VARCHAR(10)  NOT NULL,
+    time_bucket DATETIME     NOT NULL,
+    status      VARCHAR(20)  NOT NULL,
+    retry_count INT          NOT NULL DEFAULT 0,
+    duration_ms BIGINT,
+    error_msg   VARCHAR(500),
+    created_at  DATETIME(3)  NOT NULL,
+    updated_at  DATETIME(3),
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_job_id (job_id),
+    INDEX idx_status (status),
+    INDEX idx_symbol (symbol)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
