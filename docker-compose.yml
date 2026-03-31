@@ -100,6 +100,7 @@ services:
     container_name: market-ingest
     restart: unless-stopped
     environment:
+      SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
       SPRING_DATASOURCE_USERNAME: market_user
       SPRING_DATASOURCE_PASSWORD: market123
@@ -134,6 +135,7 @@ services:
     container_name: market-raw-consumer
     restart: unless-stopped
     environment:
+      SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
       SPRING_DATASOURCE_USERNAME: market_user
       SPRING_DATASOURCE_PASSWORD: market123
@@ -158,6 +160,7 @@ services:
     container_name: market-etl
     restart: unless-stopped
     environment:
+      SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_raw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
       SPRING_DATASOURCE_USERNAME: market_user
       SPRING_DATASOURCE_PASSWORD: market123
@@ -179,6 +182,7 @@ services:
     container_name: market-report
     restart: unless-stopped
     environment:
+      SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/market_dw?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Ho_Chi_Minh
       SPRING_DATASOURCE_USERNAME: market_user
       SPRING_DATASOURCE_PASSWORD: market123
