@@ -36,6 +36,9 @@ services:
       - "2181:2181"
     networks:
       - pipeline-net
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -61,6 +64,8 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
   rabbitmq:
     image: rabbitmq:3.12-management
@@ -79,6 +84,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
 
   redis:
     image: redis:7.2-alpine
@@ -94,6 +101,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    volumes:
+      - redis_data:/data
 
   # ─── Spring Boot Services ────────────────────────────
   ingest-service:
@@ -223,6 +232,11 @@ services:
 
 volumes:
   mysql_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_logs:
+  rabbitmq_data:
+  redis_data:
 
 networks:
   pipeline-net:
