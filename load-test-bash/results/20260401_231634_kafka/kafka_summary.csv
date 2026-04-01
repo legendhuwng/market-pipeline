@@ -1,0 +1,7 @@
+level_workers,duration_s,produced,consumed,final_lag,produce_rps,consume_rps,lag_trend
+23:17:41,10 45 6080 6080 0 135.1 135.1 stable
+23:18:47,50 45 7303 7303 0 162.2 162.2 stable
+23:19:55,100 45 6228 6228 0 138.4 138.4 stable
+23:21:05,200 45 7466 7466 0 165.9 165.9 stable
+23:22:12,400 45 6488 6488 0 144.1 144.1 stable
+23:23:24,600 45 7403 7403 0 164.5 164.5 stable

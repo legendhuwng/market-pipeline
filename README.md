@@ -281,20 +281,122 @@ docker exec market-redis redis-cli -a redis123 --no-auth-warning FLUSHALL
 
 ---
 
-## Performance Benchmarks (WSL Ubuntu 24.04)
+## Performance Benchmarks (WSL2 Ubuntu 24.04)
 
-Measured on a local WSL2 environment:
+Measured via load test suite (`load-test-bash/`) on a local WSL2 environment.
+Test method: bash + curl, no external tool required.
 
-| Generator interval | Throughput | ETL queue pending |
-|-------------------|-----------|-------------------|
-| 500ms | 2 rec/s | 0 ✅ |
-| 100ms | 10 rec/s | 0 ✅ |
-| 50ms | 19 rec/s | 0 ✅ |
-| 1ms | ~317 rec/s | ~3 ✅ |
+---
 
-ETL average processing time: **~10ms per job**. ETL success rate: **100%**.
+### Ingest Service `:8080`
 
-On a native Linux server, throughput is expected to be 5–10× higher.
+Ramp test from 1 → 300 concurrent workers, 20s per level.
+
+| Concurrent workers | Actual RPS | p95 (ms) | p99 (ms) | Error rate |
+|-------------------|-----------|---------|---------|-----------|
+| 1 | 32 | 25 | 28 | 0% ✅ |
+| 5 | 72 | 61 | 75 | 0% ✅ |
+| 10 | 101 | 89 | 108 | 0% ✅ |
+| 20 | 120 | 162 | 199 | 0% ✅ |
+| **50** | **118** | **410** | **472** | **0% ✅** |
+| 100 | 128 | 790 | 903 | 0% ⚠️ |
+| 150 | 147 | 1021 | 1170 | 0% ⚠️ |
+| 200 | 145 | 1388 | 1589 | 0% ⚠️ |
+| 300 | 151 | 1889 | 2150 | 0% ⚠️ |
+
+**Sweet spot: 20–50 concurrent senders** → ~120 RPS, p99 < 500ms.
+
+Throughput plateaus at ~150 RPS regardless of workers — bottleneck is Kafka
+producer throughput and Spring MVC thread pool, not connection count.
+
+---
+
+### Kafka `market.trades` topic
+
+Steady-state throughput test, 45s per level. Consumer group: `raw-consumer-group`.
+
+| Senders | Produced | Consumed | Produce RPS | Consume RPS | Lag |
+|--------|---------|---------|------------|------------|-----|
+| 10 | 6,080 | 6,080 | 135 | 135 | 0 ✅ |
+| 50 | 7,303 | 7,303 | 162 | 162 | 0 ✅ |
+| 100 | 6,228 | 6,228 | 138 | 138 | 0 ✅ |
+| 200 | 7,466 | 7,466 | 166 | 166 | 0 ✅ |
+| 400 | 6,488 | 6,488 | 144 | 144 | 0 ✅ |
+| 600 | 7,403 | 7,403 | 165 | 165 | 0 ✅ |
+
+**Kafka + Raw Consumer are not the bottleneck.** Lag stays at 0 across all load
+levels. Stable throughput ~130–165 msg/s with `batch-size=200`, `concurrency=3`.
+
+---
+
+### ETL Worker `:8084`
+
+End-to-end pipeline test: ingest event → visible in `fact_market_1m`.
+
+| Stage | Target RPS | Kafka lag | RabbitMQ backlog | ETL avg (ms) | E2E latency (avg) |
+|-------|-----------|----------|----------------|------------|-----------------|
+| LOW   | 20 rps | 0–5 | 0 ✅ | ~11 ms | ~1,341 ms |
+| MID   | 100 rps | 13–24 | 0 ✅ | ~13 ms | ~1,874 ms |
+| HIGH  | 300 rps | 0 | 1,633 ⚠️ | ~17 ms | ~4,809 ms |
+
+**ETL sweet spot: ≤ 80 staging jobs/s** (corresponds to ~100 raw events/s with
+deduplication). Above this threshold, `etl.staging` backlog starts accumulating.
+
+RabbitMQ observe results (120s real-time monitoring at mixed load):
+
+| Time window | Queue behavior | out_rate | Status |
+|------------|---------------|---------|--------|
+| 23:05:18–23:06:24 | ready=0 stable | ≈ in_rate | ✅ healthy |
+| 23:06:28–23:06:51 | brief spikes, self-recovers | 33–52/s | ⚠️ warning |
+| 23:06:48–23:07:15 | backlog 382→768, no recovery | 21–25/s | ❌ overload |
+
+ETL overload trigger: sustained `in_rate > 80 msg/s` for more than ~15s.
+Root cause: `setConcurrentConsumers=2` limits throughput to `2 × (1000ms / 17ms) ≈ 117 jobs/s`
+theoretical, but actual DB contention (HikariCP pool=10, 4 queries/job) caps it at ~70–80 jobs/s.
+
+---
+
+### Report Service `:8085`
+
+Ramp test from 1 → 400 workers, 20s per level. Mix: 50% cache-hit / 50% DB query.
+
+| Workers | RPS | Cache hit p95 (ms) | Cache hit p99 (ms) |
+|--------|-----|------------------|------------------|
+| 1 | 30 | 49 | 58 | 
+| 5 | 48 | 55 | 67 |
+| 10 | 70 | 87 | 108 |
+| **20** | **82** | **170** | **198** |
+| 50 | 97 | 413 | 554 |
+| 100 | 96 | 847 | 1,369 |
+| 200 | 93 | 2,170 | 2,881 |
+| 300 | 108 | 2,261 | 3,555 |
+| 400 | 125 | 2,491 | 3,175 |
+
+**Sweet spot: ≤ 20 concurrent API clients** → p99 < 200ms on cached queries.
+
+Redis hit ratio: **99.9%** (14,975 hits / 11 misses) — preload on startup works.
+Cache TTL: 60s. Cache invalidation triggered by ETL via `cache.invalidate` queue.
+
+---
+
+### Recommended operating parameters
+
+Based on load test results, the following settings keep all services within
+healthy thresholds simultaneously:
+
+| Parameter | Current | Recommended | Location |
+|-----------|---------|-------------|----------|
+| Generator interval | 500ms | **50–100ms** (10–20 rps) | `docker-compose.yml` |
+| Kafka partitions | 3 | 3 (sufficient) | `docker-compose.yml` |
+| Raw consumer batch-size | 200 | 200 (sufficient) | `raw-consumer/application.yml` |
+| Raw consumer concurrency | 3 | 3 (sufficient) | `KafkaConsumerConfig.java` |
+| ETL `setConcurrentConsumers` | 2 | **8** | `RabbitMQConfig.java` |
+| ETL `maxConcurrentConsumers` | 5 | **15** | `RabbitMQConfig.java` |
+| ETL HikariCP pool size | 10 | **20** | `etl-worker/application.yml` |
+| Redis TTL | 60s | 60s (sufficient) | `report-service/application.yml` |
+
+Applying the ETL concurrency fix raises ETL throughput from ~70 jobs/s to
+~350 jobs/s (theoretical), which keeps `etl.staging` backlog at 0 up to ~300 rps ingest load.
 
 ---
 
