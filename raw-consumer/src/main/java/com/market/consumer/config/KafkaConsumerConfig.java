@@ -48,6 +48,7 @@ public class KafkaConsumerConfig {
             new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory());
         factory.setBatchListener(true); // QUAN TRỌNG: nhận List<> thay vì từng message
+        factory.setConcurrency(3);
         return factory;
     }
 }

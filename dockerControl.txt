@@ -13,3 +13,6 @@ docker compose up -d --build
 
 # Xem log để chắc tất cả start ok
 docker compose logs -f --tail=20
+
+docker volume rm market-pipeline_mysql_data 2>/dev/null
+docker volume ls | grep market

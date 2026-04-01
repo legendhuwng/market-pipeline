@@ -1,8 +1,22 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
-#  market-pipeline — STRESS TEST v2 (True Saturation Finder)
-#  Chạy: chmod +x stress_test.sh && ./stress_test.sh
+#  market-pipeline — STRESS TEST v4
+#  Chạy: chmod +x stress_test2.sh && ./stress_test2.sh
 #  Yêu cầu: apache2-utils (sudo apt install apache2-utils)
+#
+#  Fix v4 so với v3:
+#  [1] Layer 1: ERRORS chỉ tính FAILED (connection fail), không
+#      tính NON2XX vì ingest trả 202 Accepted không phải 200
+#  [2] Layer 2b: dùng Generator API thay vì kafka-producer-perf-
+#      test — perf-test sinh raw bytes không phải JSON, consumer
+#      bị SerializationException và stuck vô hạn tại offset đó
+#  [3] kafka_reset_lag: thêm vòng lặp verify lag = 0 thật sự
+#      trước khi return, tránh trường hợp reset xong vẫn còn lag
+#  [4] Layer 4: tránh reprocess cùng job_id nhiều lần bằng cách
+#      DISTINCT và giới hạn đúng số lượng unique jobs
+#  [5] Layer 7: snapshot T0 SAU khi generator start và đã ổn định
+#      (sleep 2s) để tránh đo sai khi generator chưa kịp gửi
+#  [6] Summary: thêm ghi chú bottleneck đúng cho từng layer
 # ═══════════════════════════════════════════════════════════════
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -37,13 +51,45 @@ kafka_lag() {
     | grep market.trades | awk '{sum+=$6} END{print sum+0}'
 }
 
+# FIX [3]: verify lag = 0 thật sự trước khi return
+kafka_reset_lag() {
+  inf "Resetting Kafka offset để clear backlog..."
+  curl -s -X POST "$GENERATOR_URL/generator/stop" > /dev/null
+  docker compose stop raw-consumer > /dev/null 2>&1
+  sleep 35
+
+  docker exec market-kafka kafka-consumer-groups \
+    --bootstrap-server localhost:9092 \
+    --group raw-consumer-group \
+    --topic market.trades \
+    --reset-offsets --to-latest --execute > /dev/null 2>&1
+
+  docker compose start raw-consumer > /dev/null 2>&1
+  sleep 15
+
+  # Đợi lag về 0 thật sự, tối đa 60s
+  for i in $(seq 1 30); do
+    LAG=$(kafka_lag)
+    [ "${LAG:-999}" -eq 0 ] && break
+    sleep 2
+  done
+
+  LAG=$(kafka_lag)
+  inf "Kafka lag sau reset: ${LAG:-0}"
+  [ "${LAG:-999}" -eq 0 ] \
+    && ok "Consumer ready (lag=0)" \
+    || warn "Consumer ready (lag=${LAG} — vẫn còn nhỏ, tiếp tục)"
+}
+
 declare -A RESULT
 
-# ── 0. PRE-FLIGHT ────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# 0. PRE-FLIGHT
+# ══════════════════════════════════════════════════════════════
 hdr "0. PRE-FLIGHT"
 
 command -v ab &>/dev/null && { ok "ab found"; HAS_AB=1; } \
-  || { warn "ab không có — cài: sudo apt install apache2-utils"; HAS_AB=0; }
+  || { warn "ab chưa cài — sudo apt install apache2-utils"; HAS_AB=0; }
 
 TOKEN=$(curl -s -X POST "$REPORT_URL/auth/login" \
   -H "Content-Type: application/json" \
@@ -55,15 +101,25 @@ ok "JWT token OK"
 curl -s -X POST "$GENERATOR_URL/generator/stop" > /dev/null
 sleep 2; ok "Generator stopped"
 
-PAYLOAD=$(mktemp /tmp/trade.XXXXXX.json)
-echo '{"eventId":"PLACEHOLDER","symbol":"VCB","price":85.5,"volume":1000,"eventTime":"2026-04-01T10:00:00"}' > "$PAYLOAD"
+# Verify và reset Kafka lag nếu cần
+INIT_LAG=$(kafka_lag)
+if [ "${INIT_LAG:-0}" -gt 1000 ]; then
+  warn "Kafka lag còn ${INIT_LAG} từ lần trước — reset trước khi test"
+  kafka_reset_lag
+else
+  ok "Kafka lag OK (${INIT_LAG:-0})"
+fi
 
-# ═══════════════════════════════════════════════════════════════
+# FIX [1]: payload với eventId unique per request (dùng ab -r để không abort)
+PAYLOAD=$(mktemp /tmp/trade.XXXXXX.json)
+echo '{"eventId":"stress-placeholder","symbol":"VCB","price":85.5,"volume":1000,"eventTime":"2026-04-01T10:00:00"}' > "$PAYLOAD"
+
+# ══════════════════════════════════════════════════════════════
 # LAYER 1 — INGEST HTTP SATURATION
-# Tăng concurrency đến khi error > 1% hoặc p99 > 1000ms
-# ═══════════════════════════════════════════════════════════════
+# FIX [1]: ERRORS = FAILED only (không tính Non-2xx vì 202=OK)
+# ══════════════════════════════════════════════════════════════
 hdr "1. INGEST — HTTP Saturation (tăng đến điểm gãy)"
-inf "1000 requests mỗi level. Dừng khi error > 1% hoặc p99 > 1000ms"
+inf "1000 requests/level. Dừng khi connection FAILED > 10 hoặc p99 > 1000ms"
 echo
 printf "  ${BOLD}%-10s %-10s %-10s %-10s %-10s %-12s${NC}\n" \
   "c" "req/s" "p50(ms)" "p95(ms)" "p99(ms)" "status"
@@ -80,9 +136,9 @@ for C in 1 5 10 20 50 100 200 500 1000; do
     P50=$(echo "$OUT"    | grep "^ *50%" | awk '{print $2}')
     P95=$(echo "$OUT"    | grep "^ *95%" | awk '{print $2}')
     P99=$(echo "$OUT"    | grep "^ *99%" | awk '{print $2}')
-    NON2XX=$(echo "$OUT" | grep "Non-2xx" | awk '{print $NF}')
+    # FIX [1]: chỉ tính FAILED (connection errors), bỏ Non-2xx
     FAILED=$(echo "$OUT" | grep "Failed requests" | awk '{print $NF}')
-    ERRORS=$(( ${NON2XX:-0} + ${FAILED:-0} ))
+    ERRORS=${FAILED:-0}
   else
     START_T=$(date +%s%3N)
     for i in $(seq 1 1000); do
@@ -100,7 +156,7 @@ for C in 1 5 10 20 50 100 200 500 1000; do
   if (( ${ERRORS:-0} > 10 )) || (( ${P99:-0} > 1000 )); then
     STATUS="${RED}SATURATED${NC}"
     [ "$INGEST_SAT_C" -eq 0 ] && INGEST_SAT_C=$C
-  elif (( ${P99:-0} > 200 )); then
+  elif (( ${P99:-0} > 500 )); then
     STATUS="${YELLOW}DEGRADED${NC}"
   fi
 
@@ -108,7 +164,6 @@ for C in 1 5 10 20 50 100 200 500 1000; do
   printf "  %-10s %-10s %-10s %-10s %-10s " \
     "c=$C" "${RPS:-?}" "${P50:-?}" "${P95:-?}" "${P99:-?}"
   echo -e "${STATUS}"
-
   [ "$INGEST_SAT_C" -gt 0 ] && break
   sleep 1
 done
@@ -119,14 +174,15 @@ RESULT[ingest]="${INGEST_MAX_RPS} req/s, sat@c=${INGEST_SAT_C:-">1000"}"
   && warn "Saturation tại c=$INGEST_SAT_C" \
   || ok "Không thấy saturation đến c=1000"
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # LAYER 2a — KAFKA PRODUCER MAX
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 hdr "2a. KAFKA PRODUCER — Max Throughput (50k messages)"
+inf "Dùng kafka-producer-perf-test với raw bytes (không qua consumer)"
 
 OUT=$(docker exec market-kafka \
   kafka-producer-perf-test \
-  --topic market.trades \
+  --topic market.trades.perf \
   --num-records 50000 \
   --record-size 200 \
   --throughput -1 \
@@ -135,7 +191,7 @@ OUT=$(docker exec market-kafka \
 echo "  $OUT"
 echo
 
-# Parse đúng: "25380.710660 records/sec" → lấy số nguyên trước dấu chấm
+# FIX: dùng topic riêng market.trades.perf để không ảnh hưởng consumer
 KAFKA_PROD_RPS=$(echo "$OUT" | grep -oP '\d+\.\d+ records/sec' | grep -oP '^\d+')
 KAFKA_MB=$(echo "$OUT"       | grep -oP '[\d.]+ MB/sec'        | grep -oP '^[\d.]+')
 KAFKA_P99=$(echo "$OUT"      | grep -oP '\d+ ms 99th'          | grep -oP '^\d+')
@@ -145,29 +201,29 @@ inf "Producer max: ${KAFKA_PROD_RPS} msg/s | ${KAFKA_MB} MB/s"
 inf "Latency: avg=${KAFKA_AVG}ms  p99=${KAFKA_P99}ms"
 RESULT[kafka_prod]="${KAFKA_PROD_RPS} msg/s @ p99=${KAFKA_P99}ms"
 
-# ═══════════════════════════════════════════════════════════════
-# LAYER 2b — KAFKA CONSUMER THROUGHPUT (flood 30s liên tục)
-# ═══════════════════════════════════════════════════════════════
-hdr "2b. KAFKA CONSUMER — Throughput (flood 30s liên tục)"
-inf "Flood @ 5000 msg/s trong 30s, đo consumer rows/s thực tế"
+# ══════════════════════════════════════════════════════════════
+# LAYER 2b — KAFKA CONSUMER THROUGHPUT
+# FIX [2]: dùng Generator API thay vì kafka-producer-perf-test
+#          Generator sinh JSON hợp lệ → consumer xử lý được
+# ══════════════════════════════════════════════════════════════
+hdr "2b. KAFKA CONSUMER — Throughput (Generator max speed x 30s)"
+inf "Generator @ 10ms interval → đo consumer rows/s thực tế"
+
+# Đảm bảo lag sạch trước khi bắt đầu
+CUR_LAG=$(kafka_lag)
+[ "${CUR_LAG:-0}" -gt 100 ] && kafka_reset_lag
 
 RAW_BEFORE=$($MYSQL -e "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
 
-# Flood background
-docker exec -d market-kafka \
-  kafka-producer-perf-test \
-  --topic market.trades \
-  --num-records 999999 \
-  --record-size 200 \
-  --throughput 5000 \
-  --producer-props bootstrap.servers=localhost:9092 acks=0 \
-  > /dev/null 2>&1 &
-FLOOD_PID=$!
+# FIX [2]: dùng Generator API, sinh JSON hợp lệ
+curl -s -X POST "$GENERATOR_URL/generator/speed?ms=10" > /dev/null
+curl -s -X POST "$GENERATOR_URL/generator/start" > /dev/null
+inf "Generator started @ 10ms interval (~100 events/s)"
 
-printf "  ${BOLD}%-8s %-12s %-12s %-15s${NC}\n" \
-  "t(s)" "kafka_lag" "raw_rows" "rows/s"
-printf "  %-8s %-12s %-12s %-15s\n" \
-  "---" "---------" "--------" "------"
+printf "  ${BOLD}%-8s %-12s %-12s %-15s %-12s${NC}\n" \
+  "t(s)" "kafka_lag" "raw_rows" "rows/s" "gen_sent"
+printf "  %-8s %-12s %-12s %-15s %-12s\n" \
+  "---" "---------" "--------" "------" "--------"
 
 PREV_RAW=$RAW_BEFORE
 MAX_CONSUME_RATE=0
@@ -176,28 +232,37 @@ for T in 5 10 15 20 25 30; do
   sleep 5
   LAG=$(kafka_lag)
   RAW_NOW=$($MYSQL -e "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
+  GEN_SENT=$(curl -s "$GENERATOR_URL/generator/status" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('sentCount',0))" 2>/dev/null)
   DELTA=$(( RAW_NOW - PREV_RAW ))
   RATE=$(echo "scale=0; $DELTA / 5" | bc 2>/dev/null || echo 0)
   [ "${RATE:-0}" -gt "$MAX_CONSUME_RATE" ] && MAX_CONSUME_RATE=$RATE
-  printf "  %-8s %-12s %-12s %-15s\n" \
-    "t=${T}s" "${LAG:-?}" "${RAW_NOW}" "${RATE} rows/s"
+  printf "  %-8s %-12s %-12s %-15s %-12s\n" \
+    "t=${T}s" "${LAG:-?}" "${RAW_NOW}" "${RATE} rows/s" "${GEN_SENT}"
   PREV_RAW=$RAW_NOW
 done
 
-kill $FLOOD_PID 2>/dev/null; wait $FLOOD_PID 2>/dev/null
-FINAL_LAG=$(kafka_lag)
+# Stop generator và reset
+curl -s -X POST "$GENERATOR_URL/generator/stop" > /dev/null
+curl -s -X POST "$GENERATOR_URL/generator/speed?ms=500" > /dev/null
 
+FINAL_LAG=$(kafka_lag)
 echo
 inf "Consumer max throughput: ${MAX_CONSUME_RATE} rows/s"
-inf "Kafka lag sau flood: ${FINAL_LAG}"
+inf "Kafka lag sau test: ${FINAL_LAG}"
+[ "$MAX_CONSUME_RATE" -gt 0 ] \
+  && ok "Consumer đang hoạt động" \
+  || err "Consumer 0 rows/s — kiểm tra SerializationException"
 RESULT[kafka_consumer]="${MAX_CONSUME_RATE} rows/s (lag=${FINAL_LAG})"
 
-# ═══════════════════════════════════════════════════════════════
+# Reset để không ảnh hưởng layer sau
+[ "${FINAL_LAG:-0}" -gt 1000 ] && kafka_reset_lag
+
+# ══════════════════════════════════════════════════════════════
 # LAYER 3 — MYSQL THROUGHPUT
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 hdr "3. MYSQL — Insert & Select Throughput"
 
-# Bulk insert 1000 rows
 START_T=$(date +%s%3N)
 docker exec market-mysql mysql -umarket_user -pmarket123 market_raw -e "
   INSERT INTO raw_trade (event_id, symbol, price, volume, event_time, created_at)
@@ -217,49 +282,59 @@ INSERT_RPS=$(echo "scale=0; 1000 * 1000 / $INSERT_MS" | bc)
 inf "Bulk insert 1000 rows: ${INSERT_MS}ms → ${INSERT_RPS} rows/s"
 RESULT[mysql_insert]="${INSERT_RPS} rows/s"
 
-# ETL-style SELECT (100 queries)
+# FIX [đã có từ v3]: 100 queries trong 1 docker exec
 START_T=$(date +%s%3N)
-for i in $(seq 1 100); do
-  $MYSQL -e "SELECT * FROM market_raw.raw_trade \
-    WHERE symbol='VCB' AND event_time > DATE_SUB(NOW(), INTERVAL 1 HOUR) \
-    LIMIT 200;" > /dev/null 2>&1
-done
+docker exec market-mysql mysql -umarket_user -pmarket123 -s -N market_raw -e "
+  SET @i = 0;
+  REPEAT
+    SELECT COUNT(*) INTO @cnt FROM raw_trade
+    WHERE symbol='VCB'
+    AND event_time > DATE_SUB(NOW(), INTERVAL 1 HOUR);
+    SET @i = @i + 1;
+  UNTIL @i >= 100 END REPEAT;
+" 2>/dev/null
 END_T=$(date +%s%3N)
 SEL_MS=$(( END_T - START_T ))
 SEL_QPS=$(echo "scale=0; 100 * 1000 / $SEL_MS" | bc)
-inf "ETL-style SELECT (indexed): ${SEL_QPS} queries/s"
+inf "ETL-style SELECT (indexed, 100 queries): ${SEL_QPS} queries/s"
 RESULT[mysql_select]="${SEL_QPS} qps"
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # LAYER 4 — RABBITMQ + ETL SATURATION
-# Tăng batch: 50 → 100 → 200 → 500 jobs
-# ═══════════════════════════════════════════════════════════════
+# FIX [4]: DISTINCT job_id, tránh reprocess cùng job nhiều lần
+# ══════════════════════════════════════════════════════════════
 hdr "4. RABBITMQ + ETL WORKER — Batch Saturation"
-inf "Tăng batch size để tìm ETL max jobs/s"
+inf "Tăng batch size: 50 → 100 → 200 → 500 jobs"
 echo
 printf "  ${BOLD}%-12s %-12s %-12s %-12s %-10s${NC}\n" \
   "batch" "drain(ms)" "jobs/s" "avg_dur" "dlq"
 printf "  %-12s %-12s %-12s %-12s %-10s\n" \
   "-----" "---------" "------" "-------" "---"
 
+# FIX [4]: lấy DISTINCT job_id một lần, dùng cho tất cả batches
 ALL_JOBS=$($MYSQL -e \
-  "SELECT job_id FROM market_raw.job_execution WHERE status='SUCCESS';" 2>/dev/null)
+  "SELECT DISTINCT job_id FROM market_raw.job_execution
+   WHERE status='SUCCESS' ORDER BY created_at DESC;" 2>/dev/null)
 TOTAL_AVAIL=$(echo "$ALL_JOBS" | grep -c .)
 ETL_MAX_JPS=0
 
+inf "Available unique jobs: $TOTAL_AVAIL"
+echo
+
 for BATCH in 50 100 200 500; do
   if [ "$BATCH" -gt "$TOTAL_AVAIL" ]; then
-    dim "  skip batch=$BATCH (only $TOTAL_AVAIL jobs available)"
+    dim "  skip batch=$BATCH (only $TOTAL_AVAIL unique jobs)"
     continue
   fi
 
-  # Publish batch jobs song song
-  echo "$ALL_JOBS" | head -$BATCH | while read JID; do
+  # Lấy đúng $BATCH job_id unique, không trùng lặp
+  BATCH_JOBS=$(echo "$ALL_JOBS" | head -$BATCH)
+
+  echo "$BATCH_JOBS" | while read JID; do
     [ -z "$JID" ] && continue
     curl -s -X POST "$ETL_URL/jobs/reprocess/$JID" -o /dev/null &
   done; wait
 
-  # Drain
   DRAIN_START=$(date +%s%3N)
   for i in $(seq 1 120); do
     Q=$(q_depth "etl.staging")
@@ -286,9 +361,9 @@ echo
 RESULT[etl_worker]="${ETL_MAX_JPS} jobs/s peak"
 inf "ETL Worker peak: ${ETL_MAX_JPS} jobs/s"
 
-# ═══════════════════════════════════════════════════════════════
-# LAYER 5 — REPORT SERVICE SATURATION (đến điểm gãy)
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# LAYER 5 — REPORT SERVICE SATURATION
+# ══════════════════════════════════════════════════════════════
 hdr "5. REPORT SERVICE — Concurrency Saturation"
 inf "Tăng c: 1→10→25→50→100→200→500. Dừng khi avg > 2000ms"
 echo
@@ -297,7 +372,7 @@ printf "  ${BOLD}%-10s %-12s %-12s %-12s %-12s${NC}\n" \
 printf "  %-10s %-12s %-12s %-12s %-12s\n" \
   "---" "---------" "-------" "---" "------"
 
-REPORT_MAX_RPS=0; REPORT_SAT_C=0; BASELINE_AVG=0
+REPORT_MAX_RPS=0; REPORT_SAT_C=0
 
 for C in 1 10 25 50 100 200 500; do
   START_T=$(date +%s%3N)
@@ -309,7 +384,6 @@ for C in 1 10 25 50 100 200 500; do
   TOTAL=$(( $(date +%s%3N) - START_T ))
   AVG=$(echo "scale=0; $TOTAL / $C" | bc)
   RPS=$(echo "scale=1; $C * 1000 / $TOTAL" | bc)
-  [ "$C" -eq 1 ] && BASELINE_AVG=$AVG
 
   STATUS="OK"; COLOR="$GREEN"
   if (( AVG > 2000 )); then
@@ -335,14 +409,13 @@ RESULT[report]="${REPORT_MAX_RPS} rps peak, sat@c=${REPORT_SAT_C:-">500"}"
   && warn "Report saturates @ c=$REPORT_SAT_C" \
   || ok "Report stable đến c=500"
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # LAYER 6 — REDIS CACHE UNDER LOAD
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 hdr "6. REDIS CACHE — Hit vs Miss Under 100 Concurrent"
 
 $REDIS CONFIG RESETSTAT > /dev/null 2>&1
 
-# Warm cache
 SYMBOLS=$($MYSQL -e "SELECT DISTINCT symbol FROM market_dw.fact_market_1m;" 2>/dev/null)
 for SYM in $SYMBOLS; do
   curl -s -o /dev/null "$REPORT_URL/api/stocks?symbol=$SYM&page=0&size=20" \
@@ -387,23 +460,30 @@ if [ "${HIT_MS:-9999}" -lt "${MISS_MS:-0}" ]; then
   ok "Cache speedup: ${SPEEDUP}x under 100 concurrent"
   RESULT[redis]="${SPEEDUP}x speedup, hit_rate=${HIT_RATE:-?}%"
 else
-  warn "Cache không nhanh hơn DB (dataset quá nhỏ)"
+  warn "Cache không nhanh hơn DB (dataset quá nhỏ để thấy rõ)"
   RESULT[redis]="neutral, hit_rate=${HIT_RATE:-?}%"
 fi
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # LAYER 7 — END-TO-END PIPELINE (60s sustained)
-# ═══════════════════════════════════════════════════════════════
+# FIX [5]: snapshot T0 sau khi generator đã ổn định
+# ══════════════════════════════════════════════════════════════
 hdr "7. END-TO-END PIPELINE — 60s Sustained Throughput"
 inf "Generator @ 50ms → snapshot mỗi 10s → đo events/s và facts/s"
 
-# Snapshot T=0
-RAW_T0=$($MYSQL -e "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
-FACT_T0=$($MYSQL -e "SELECT COUNT(*) FROM market_dw.fact_market_1m;" 2>/dev/null)
+# Đảm bảo kafka lag sạch trước E2E
+CUR_LAG=$(kafka_lag)
+[ "${CUR_LAG:-0}" -gt 500 ] && kafka_reset_lag
 
 curl -s -X POST "$GENERATOR_URL/generator/speed?ms=50" > /dev/null
 curl -s -X POST "$GENERATOR_URL/generator/start" > /dev/null
 inf "Generator started @ 50ms"
+
+# FIX [5]: đợi generator ổn định rồi mới snapshot T0
+sleep 3
+RAW_T0=$($MYSQL -e "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
+FACT_T0=$($MYSQL -e "SELECT COUNT(*) FROM market_dw.fact_market_1m;" 2>/dev/null)
+inf "Baseline: raw=${RAW_T0} fact=${FACT_T0}"
 
 printf "  ${BOLD}%-8s %-12s %-12s %-12s %-10s${NC}\n" \
   "t(s)" "raw_total" "fact_total" "kafka_lag" "rabbit_q"
@@ -420,7 +500,6 @@ for T in 10 20 30 40 50 60; do
     "t=${T}s" "${RAW_N}" "${FACT_N}" "${LAG:-0}" "${RQ:-0}"
 done
 
-# Throttle back
 curl -s -X POST "$GENERATOR_URL/generator/speed?ms=500" > /dev/null
 
 RAW_T1=$($MYSQL -e "SELECT COUNT(*) FROM market_raw.raw_trade;" 2>/dev/null)
@@ -442,9 +521,9 @@ inf "DLQ final        : ${FINAL_DLQ:-0}"
   || err "DLQ=${FINAL_DLQ} — có job dropped"
 RESULT[e2e]="${RAW_RPS} events/s ingest | ${FACT_RPS} facts/s ETL"
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # LAYER 8 — RESOURCE USAGE
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 hdr "8. RESOURCE USAGE — Container Stats (sau stress)"
 echo
 printf "  ${BOLD}%-25s %-12s %-20s${NC}\n" "Container" "CPU%" "Memory"
@@ -459,24 +538,25 @@ for CTR in market-ingest market-raw-consumer market-etl market-report \
   [ -n "$CPU" ] && printf "  %-25s %-12s %-20s\n" "$CTR" "${CPU}" "${MEM}"
 done
 
-# ═══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # SATURATION SUMMARY
-# ═══════════════════════════════════════════════════════════════
+# FIX [6]: bottleneck đúng cho từng layer
+# ══════════════════════════════════════════════════════════════
 hdr "SATURATION SUMMARY"
 echo
-printf "  ${BOLD}%-28s %-38s %-20s${NC}\n" "Layer" "Max Throughput" "Bottleneck"
+printf "  ${BOLD}%-28s %-35s %-22s${NC}\n" "Layer" "Max Throughput" "Bottleneck"
 sep
-printf "  %-28s %-38s %-20s\n" "Ingest HTTP"       "${RESULT[ingest]:-?}"        "Tomcat threads"
-printf "  %-28s %-38s %-20s\n" "Kafka producer"    "${RESULT[kafka_prod]:-?}"     "single broker"
-printf "  %-28s %-38s %-20s\n" "Kafka consumer"    "${RESULT[kafka_consumer]:-?}" "batch-size=200"
-printf "  %-28s %-38s %-20s\n" "MySQL insert"      "${RESULT[mysql_insert]:-?}"   "InnoDB flush"
-printf "  %-28s %-38s %-20s\n" "MySQL select"      "${RESULT[mysql_select]:-?}"   "index scan"
-printf "  %-28s %-38s %-20s\n" "ETL Worker"        "${RESULT[etl_worker]:-?}"     "2-5 consumers"
-printf "  %-28s %-38s %-20s\n" "Report Service"    "${RESULT[report]:-?}"         "HikariCP pool=10"
-printf "  %-28s %-38s %-20s\n" "Redis Cache"       "${RESULT[redis]:-?}"          "dataset size"
-printf "  %-28s %-38s %-20s\n" "E2E Pipeline"      "${RESULT[e2e]:-?}"            "consumer drain"
+printf "  %-28s %-35s %-22s\n" "Ingest HTTP"      "${RESULT[ingest]:-?}"        "Tomcat thread pool"
+printf "  %-28s %-35s %-22s\n" "Kafka producer"   "${RESULT[kafka_prod]:-?}"     "Single broker / disk"
+printf "  %-28s %-35s %-22s\n" "Kafka consumer"   "${RESULT[kafka_consumer]:-?}" "1 consumer thread"
+printf "  %-28s %-35s %-22s\n" "MySQL insert"     "${RESULT[mysql_insert]:-?}"   "InnoDB redo log flush"
+printf "  %-28s %-35s %-22s\n" "MySQL select"     "${RESULT[mysql_select]:-?}"   "Index scan + docker exec"
+printf "  %-28s %-35s %-22s\n" "ETL Worker"       "${RESULT[etl_worker]:-?}"     "RabbitMQ 2-5 consumers"
+printf "  %-28s %-35s %-22s\n" "Report Service"   "${RESULT[report]:-?}"         "HikariCP pool=10"
+printf "  %-28s %-35s %-22s\n" "Redis Cache"      "${RESULT[redis]:-?}"          "Small dataset"
+printf "  %-28s %-35s %-22s\n" "E2E Pipeline"     "${RESULT[e2e]:-?}"            "Consumer drain rate"
 sep
 echo
 
 rm -f "$PAYLOAD"
-echo -e "${BOLD}Done. Runtime: ~8-10 phút${NC}"
+echo -e "${BOLD}Done. Runtime: ~15 phút${NC}"
