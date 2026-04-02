@@ -1,432 +1,531 @@
-# Market Data Pipeline
+# Market Pipeline
 
-A production-ready real-time market data pipeline built with Java 17, Spring Boot 4, Apache Kafka, RabbitMQ, MySQL, and Redis. The system simulates stock trading events, processes them through a multi-stage ETL pipeline, stores aggregated data in a Star Schema Data Warehouse, and exposes a secured REST API with caching.
+A near real-time market data pipeline built with Java Spring Boot, Kafka, RabbitMQ, MySQL, Redis, and Docker Compose.
+
+## 1. Overview
+
+This project simulates a stock market data processing pipeline from ingestion to analytics reporting.
+
+It demonstrates how to:
+
+- generate fake market trade events
+- ingest data through REST API
+- stream events with Kafka
+- persist raw trade data
+- orchestrate ETL jobs using RabbitMQ
+- transform data into a warehouse-friendly schema
+- expose analytics through a secure REST API
+- optimize reads using Redis cache
+
+This project is designed as a **microservice-based event-driven system**.
 
 ---
 
-## Architecture
+## 2. Architecture
 
-```
-┌─────────────────┐     HTTP POST      ┌─────────────────┐
-│  Fake Generator │ ─────────────────► │  Ingest Service │
-│     :8081       │                    │     :8080       │
-└─────────────────┘                    └────────┬────────┘
-                                                │ Kafka
-                                                ▼
-                                       ┌─────────────────┐
-                                       │  Kafka Broker   │
-                                       │ market.trades   │
-                                       └────────┬────────┘
-                                                │ consume batch
-                                                ▼
-                                       ┌─────────────────┐      ┌──────────────┐
-                                       │  Raw Consumer   │─────►│  MySQL RAW   │
-                                       │     :8082       │      │  raw_trade   │
-                                       └────────┬────────┘      └──────────────┘
-                                                │ RabbitMQ etl.staging
-                                                ▼
-                                       ┌─────────────────┐      ┌──────────────────┐
-                                       │   ETL Worker    │─────►│ MySQL STAGING    │
-                                       │     :8084       │      │  stg_trade_1m    │
-                                       └────────┬────────┘      ├──────────────────┤
-                                                │               │  MySQL DW        │
-                                                │               │  fact_market_1m  │
-                                                │               │  dim_time        │
-                                                │               │  dim_symbol      │
-                                                │               └──────────────────┘
-                                                │ cache.invalidate
-                                                ▼
-                                       ┌─────────────────┐      ┌──────────────┐
-                                       │ Report Service  │◄────►│    Redis     │
-                                       │     :8085       │      │  Cache TTL   │
-                                       └─────────────────┘      └──────────────┘
-                                                ▲
-                                         JWT Bearer Token
-                                         REST API Client
+### High-Level Flow
+
+```text
+Fake Generator
+      ↓ HTTP
+Ingest Service
+      ↓ Kafka
+Raw Consumer
+      ↓ MySQL (RAW)
+      ↓ RabbitMQ
+ETL Worker
+      ↓ MySQL (STAGING + DW)
+      ↓ RabbitMQ
+Report Service
+      ↓ Redis Cache
+      ↓ REST API
+Client / Dashboard
 ```
 
 ---
 
-## Tech Stack
+## 3. Tech Stack
 
-| Component | Technology |
-|-----------|-----------|
-| Language | Java 17 |
-| Framework | Spring Boot 4.0.5 |
-| Message Streaming | Apache Kafka (Confluent 7.5) |
-| Job Orchestration | RabbitMQ 3.12 |
-| Database | MySQL 8.0 |
-| Cache | Redis 7.2 |
-| ORM | Spring Data JPA / Hibernate 7 |
-| Security | Spring Security + JWT (jjwt 0.11.5) |
-| API Docs | SpringDoc OpenAPI / Swagger UI |
-| Observability | Spring Boot Actuator |
-| Build | Maven 3.9 |
-| Container | Docker + Docker Compose |
+### Backend
+- Java
+- Spring Boot
+- Spring Data JPA
+- Spring Security
+- Spring Kafka
+- Spring AMQP
 
----
+### Infrastructure
+- Kafka
+- RabbitMQ
+- MySQL
+- Redis
+- Docker Compose
 
-## Services
-
-### 1. Fake Generator `:8081`
-Simulates a stock exchange by continuously generating trade events for 10 Vietnamese stock symbols (VCB, VNM, HPG, FPT, MSN, TCB, BID, CTG, VIC, GAS). Price fluctuates randomly ±1% from the base price. Throughput is configurable at runtime.
-
-**Runtime control API:**
-```bash
-GET  /generator/status          # view status + sent count
-POST /generator/start           # start generating
-POST /generator/stop            # stop generating
-POST /generator/speed?ms=100    # change interval (ms)
-```
-
-### 2. Ingest Service `:8080`
-The entry point of the pipeline. Validates incoming trade events and publishes them to Kafka. Uses idempotent producer (`acks=all`, `enable.idempotence=true`) to prevent data loss.
-
-- `POST /api/trades` — receives and validates events
-- `GET  /api/health` — health check with received count
-
-**Validation rules:** `eventId` not blank, `symbol` max 10 chars, `price > 0`, `volume > 0`, `eventTime` not null.
-
-### 3. Raw Consumer `:8082`
-Consumes events from Kafka in batches of up to 200 records, batch-inserts into `raw_trade` (immutable raw layer), then groups events by `(symbol, minute)` and publishes staging jobs to RabbitMQ.
-
-- Kafka consumer group: `raw-consumer-group`
-- Batch size: 200 records
-- Queue output: `etl.staging`
-
-### 4. ETL Worker `:8084`
-The core processing engine. Consumes staging jobs from RabbitMQ and runs a 2-stage ETL pipeline within a single `@Transactional` boundary:
-
-**Stage 1 — RAW → STAGING:**
-Reads all trades for a given `(symbol, minute)` window, computes OHLCV aggregation, upserts into `stg_trade_1m`.
-
-**Stage 2 — STAGING → FACT:**
-Upserts `dim_time` dimension record, then writes to `fact_market_1m`. Idempotent — skips if fact record already exists. After successful insert, publishes a `cache.invalidate` event to RabbitMQ.
-
-**Reliability:** 3 retries with exponential backoff → DLQ on final failure. Dead Letter Queue: `etl.staging.dlq`.
-
-**Observability endpoint:**
-```bash
-GET /actuator/etl   # totalJobs, successJobs, failedJobs, successRate, avgDurationMs
-GET /actuator/health
-```
-
-### 5. Report Service `:8085`
-REST API to query the Data Warehouse. Secured with stateless JWT authentication. Integrates Redis cache (cache-aside pattern) with 60-second TTL and preloads hot symbols on startup.
-
-**Authentication:**
-```bash
-POST /auth/login   # returns JWT Bearer token
-```
-
-**Query API (requires Bearer token):**
-```bash
-GET /api/stocks                              # all data, paginated
-GET /api/stocks?symbol=VCB                   # filter by symbol
-GET /api/stocks?symbol=VCB&size=10&page=0    # pagination
-GET /api/stocks?minPrice=80&maxPrice=90      # price range filter
-GET /api/stocks?from=2026-03-29T17:00:00     # time range filter
-GET /api/stocks/symbols                      # list available symbols
-GET /swagger-ui.html                         # Swagger UI (no auth)
-GET /actuator/health                         # health check
-```
-
-**Default users:**
-
-| Username | Password | Role |
-|----------|----------|------|
-| user | user123 | USER |
-| admin | admin123 | ADMIN |
+### Architecture / Design
+- Microservices
+- Event-Driven Architecture
+- ETL Pipeline
+- Near Real-Time Reporting
+- Star Schema / Data Warehouse
 
 ---
 
-## Database Schema
+## 4. Services
 
-### RAW Layer (`market_raw`)
-```sql
+### 4.1 fake-generator
+Generates fake stock trade events and sends them to the ingest-service via HTTP.
+
+**Responsibilities**
+- simulate market activity
+- control event generation speed
+- start / stop event flow
+
+---
+
+### 4.2 ingest-service
+Receives incoming trade events via REST API and publishes them to Kafka.
+
+**Responsibilities**
+- validate incoming requests
+- act as the ingestion entry point
+- decouple producers from downstream consumers
+
+---
+
+### 4.3 raw-consumer
+Consumes Kafka messages, stores raw data into MySQL, and publishes ETL jobs to RabbitMQ.
+
+**Responsibilities**
+- persist raw trade events
+- group data into ETL-friendly buckets
+- trigger downstream ETL processing
+
+---
+
+### 4.4 etl-worker
+Consumes ETL jobs from RabbitMQ and transforms raw data into staging and warehouse layers.
+
+**Responsibilities**
+- aggregate raw data by minute
+- populate staging tables
+- build fact / dimension warehouse tables
+- track ETL job execution
+- publish cache invalidation events
+
+---
+
+### 4.5 report-service
+Provides reporting APIs based on warehouse data with Redis caching and JWT authentication.
+
+**Responsibilities**
+- expose stock analytics endpoints
+- protect APIs using JWT
+- reduce DB load via Redis cache
+- invalidate stale cache when ETL completes
+
+---
+
+## 5. Data Flow
+
+### Step 1 — Fake Event Generation
+`fake-generator` creates a random trade event such as:
+
+```json
+{
+  "symbol": "VCB",
+  "price": 93.4,
+  "volume": 100,
+  "eventTime": "2026-04-02T09:15:03"
+}
+```
+
+---
+
+### Step 2 — Event Ingestion
+`ingest-service` receives the event via REST API:
+
+```http
+POST /api/trades
+```
+
+It validates the payload and publishes it to Kafka.
+
+---
+
+### Step 3 — Event Streaming
+Kafka acts as the streaming backbone.
+
+**Topic**
+```text
+market.trades
+```
+
+---
+
+### Step 4 — Raw Persistence
+`raw-consumer` consumes Kafka messages and stores them in the raw data layer.
+
+**Raw table**
+```text
 raw_trade
-  event_id   VARCHAR(36)  PK
-  symbol     VARCHAR(10)
-  price      DECIMAL(18,4)
-  volume     BIGINT
-  event_time DATETIME(3)
-  created_at DATETIME(3)
-  INDEX idx_symbol_time (symbol, event_time)
-```
-
-### Staging Layer (`market_staging`)
-```sql
-stg_trade_1m
-  id           BIGINT  PK AUTO_INCREMENT
-  symbol       VARCHAR(10)
-  time_bucket  DATETIME
-  open_price   DECIMAL(18,4)
-  close_price  DECIMAL(18,4)
-  high_price   DECIMAL(18,4)
-  low_price    DECIMAL(18,4)
-  total_volume BIGINT
-  event_count  INT
-  UNIQUE (symbol, time_bucket)
-```
-
-### Data Warehouse (`market_dw`) — Star Schema
-```
-dim_symbol ──┐
-             ├── fact_market_1m
-dim_time   ──┘
-
-fact_market_1m: avg/max/min/open/close price, total_volume, trade_count per (symbol, minute)
-dim_time:       ts, minute_of_hour, hour_of_day, day_of_month, month_of_year, year
-dim_symbol:     symbol, company_name, sector, exchange
 ```
 
 ---
 
-## Prerequisites
+### Step 5 — ETL Trigger
+After saving raw data, `raw-consumer` publishes a staging ETL job to RabbitMQ.
 
-- Docker Desktop (or Docker Engine + Docker Compose plugin)
-- Java 17+ (for local development / running services outside Docker)
-- Maven 3.9+ (for building)
+**Queue**
+```text
+etl.staging
+```
 
 ---
 
-## Quick Start
+### Step 6 — ETL Transformation
+`etl-worker` processes ETL jobs and transforms raw data into:
 
-### 1. Clone and start infrastructure + all services
+- staging layer
+- data warehouse layer
 
+Tables involved:
+- `stg_trade_1m`
+- `dim_time`
+- `fact_market_1m`
+
+---
+
+### Step 7 — Cache Invalidation
+After ETL finishes, the worker publishes a cache invalidation message.
+
+**Queue**
+```text
+cache.invalidate
+```
+
+---
+
+### Step 8 — Reporting API
+`report-service` reads warehouse data and serves analytics through REST APIs.
+
+It uses Redis to cache frequently requested results.
+
+---
+
+## 6. Why Kafka and RabbitMQ Together?
+
+This project intentionally uses both.
+
+### Kafka is used for:
+- raw event streaming
+- append-only event log
+- high-throughput ingestion
+- replayable event history
+
+### RabbitMQ is used for:
+- ETL task orchestration
+- retry and delayed retry
+- dead-letter queues
+- command-style workflow
+
+### Why not use only one?
+Because:
+- **trade events** behave like a **stream**
+- **ETL jobs** behave like **tasks/commands**
+
+Using both tools reflects a more realistic system design.
+
+---
+
+## 7. Data Model
+
+### 7.1 RAW Layer
+
+#### Table: `raw_trade`
+Stores the original incoming trade events.
+
+**Purpose**
+- audit
+- replay
+- debugging
+- source of truth
+
+---
+
+### 7.2 STAGING Layer
+
+#### Table: `stg_trade_1m`
+Stores minute-level aggregated trade data.
+
+**Purpose**
+- reduce repeated raw scans
+- simplify ETL logic
+- prepare data for analytics
+
+---
+
+### 7.3 DATA WAREHOUSE Layer
+
+#### Dimension Table: `dim_time`
+Stores normalized time dimensions.
+
+#### Fact Table: `fact_market_1m`
+Stores minute-level market metrics.
+
+**Example measures**
+- average price
+- min price
+- max price
+- total volume
+- trade count
+
+---
+
+## 8. Star Schema
+
+The warehouse follows a basic **star schema**:
+
+```text
+           dim_time
+               |
+               |
+        fact_market_1m
+```
+
+### Why this matters
+It makes reporting and analytics easier than querying transactional raw data directly.
+
+---
+
+## 9. Retry / DLQ Mechanism
+
+ETL jobs are processed through RabbitMQ with retry and DLQ support.
+
+### Main queue
+```text
+etl.staging
+```
+
+### Retry queue
+```text
+etl.staging.retry
+```
+
+### Dead-letter queue
+```text
+etl.staging.dlq
+```
+
+### Flow
+- Job fails once → goes to retry queue
+- Retry delay expires → job returns to main queue
+- Repeated failures → job moves to DLQ
+
+### Benefits
+- prevents message loss
+- avoids infinite processing loops
+- enables operator-driven reprocessing
+
+---
+
+## 10. Cache Strategy
+
+The report service uses **Redis** with the **Cache-Aside pattern**.
+
+### Read Flow
+1. Build cache key
+2. Check Redis
+3. If hit → return cached response
+4. If miss → query MySQL
+5. Store result in Redis
+6. Return response
+
+### Cache Invalidation
+After ETL updates the warehouse, `etl-worker` publishes a cache invalidation event.
+
+`report-service` consumes it and removes stale keys.
+
+This ensures analytics stay fresh.
+
+---
+
+## 11. Security
+
+The report API is protected using **JWT authentication**.
+
+### Authentication Flow
+1. User logs in
+2. Server returns JWT token
+3. Client sends:
+```http
+Authorization: Bearer <token>
+```
+4. JWT filter validates access for protected endpoints
+
+---
+
+## 12. Observability
+
+The ETL worker includes operational endpoints and metrics.
+
+### Features
+- ETL job tracking
+- success / failure stats
+- average processing duration
+- DLQ visibility
+- job reprocessing support
+
+This makes the pipeline more maintainable and demo-friendly.
+
+---
+
+## 13. Key Business Flows
+
+### Core pipeline
+```text
+FakeGeneratorService.run()
+        ↓
+TradeController.receiveTrade()
+        ↓
+KafkaProducerService.sendTradeEvent()
+        ↓
+RawTradeConsumer.consume()
+        ↓
+StagingJobPublisher.publish()
+        ↓
+StagingJobConsumer.onStagingJob()
+        ↓
+EtlService.process()
+        ↓
+EtlService.doProcess()
+        ↓
+CacheInvalidationPublisher.invalidate()
+        ↓
+CacheInvalidationConsumer.onInvalidate()
+        ↓
+ReportService.getStocks()
+```
+
+---
+
+## 14. Strengths of the Project
+
+- clear service separation
+- event-driven architecture
+- raw/staging/warehouse layering
+- retry / DLQ support
+- cache invalidation flow
+- JWT-secured reporting API
+- strong educational value for backend/data engineering interviews
+
+---
+
+## 15. Possible Improvements
+
+### 15.1 Idempotency
+ETL jobs should be protected against duplicate processing.
+
+**Potential improvements**
+- unique constraints
+- idempotent upserts
+- dedup keys
+
+---
+
+### 15.2 Outbox Pattern
+Some DB-write + message-publish flows may not be fully atomic.
+
+**Potential improvements**
+- outbox table
+- transactional event publishing
+
+---
+
+### 15.3 Production Monitoring
+Current metrics are useful, but production systems would benefit from:
+- Prometheus
+- Grafana
+- alerting
+- tracing
+
+---
+
+### 15.4 Schema Evolution
+Trade event payloads may evolve over time.
+
+**Potential improvements**
+- schema versioning
+- schema registry
+- backward compatibility rules
+
+---
+
+## 16. How to Run
+
+### Start infrastructure and services
 ```bash
-git clone <repo-url>
-cd market-pipeline
-
-# Start everything (builds images automatically)
-docker compose up -d --build
-
-# Check status
-docker compose ps
+docker compose up -d
 ```
 
-### 2. Verify pipeline is running
-
+### Stop everything
 ```bash
-# Watch live data flow (updates every 2 seconds)
-watch -n 2 'docker exec market-mysql mysql -umarket_user -pmarket123 \
-  -e "SELECT \"raw\" tbl,COUNT(*) cnt FROM market_raw.raw_trade \
-      UNION SELECT \"staging\",COUNT(*) FROM market_staging.stg_trade_1m \
-      UNION SELECT \"fact\",COUNT(*) FROM market_dw.fact_market_1m;" 2>/dev/null'
-```
-
-### 3. Test the API
-
-```bash
-# Login
-TOKEN=$(curl -s -X POST http://localhost:8085/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"user","password":"user123"}' | \
-  python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-
-# Query stocks
-curl -s "http://localhost:8085/api/stocks?symbol=VCB&size=5" \
-  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
-```
-
----
-
-## Service URLs
-
-| Service | URL | Description |
-|---------|-----|-------------|
-| Ingest Service | http://localhost:8080 | Trade event ingestion |
-| Fake Generator | http://localhost:8081 | Generator control API |
-| Raw Consumer | http://localhost:8082 | Kafka consumer |
-| ETL Worker | http://localhost:8084 | ETL metrics + health |
-| Report Service | http://localhost:8085 | REST API + Swagger |
-| RabbitMQ UI | http://localhost:15672 | Queue management (rabbit_user/rabbit123) |
-| phpMyAdmin | http://localhost:8888 | MySQL browser (market_user/market123) |
-| Portainer | http://localhost:9000 | Docker management |
-
----
-
-## Configuration
-
-All services use environment variables for Docker deployment. Key variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SPRING_DATASOURCE_URL` | MySQL JDBC URL | localhost:3306 |
-| `SPRING_KAFKA_BOOTSTRAP_SERVERS` | Kafka broker | localhost:9092 |
-| `SPRING_RABBITMQ_HOST` | RabbitMQ host | localhost |
-| `SPRING_DATA_REDIS_HOST` | Redis host | localhost |
-| `GENERATOR_INTERVAL_MS` | Event generation interval | 500 |
-| `JWT_SECRET` | JWT signing secret | (set in yml) |
-
----
-
-## Resetting Data
-
-```bash
-# Full reset (removes all data and volumes)
 docker compose down -v
-docker compose up -d --build
-
-# Truncate tables only (keep containers running)
-docker exec market-mysql mysql -umarket_user -pmarket123 -e "
-  USE market_raw;     TRUNCATE TABLE raw_trade;
-  USE market_staging; TRUNCATE TABLE stg_trade_1m;
-  USE market_dw;      SET FOREIGN_KEY_CHECKS=0;
-                      TRUNCATE TABLE fact_market_1m;
-                      TRUNCATE TABLE dim_time;
-                      SET FOREIGN_KEY_CHECKS=1;"
-docker exec market-redis redis-cli -a redis123 --no-auth-warning FLUSHALL
 ```
 
 ---
 
-## Performance Benchmarks (WSL2 Ubuntu 24.04)
+## 17. Suggested Demo Flow
 
-Measured via load test suite (`load-test-bash/`) on a local WSL2 environment.
-Test method: bash + curl, no external tool required.
-
----
-
-### Ingest Service `:8080`
-
-Ramp test from 1 → 300 concurrent workers, 20s per level.
-
-| Concurrent workers | Actual RPS | p95 (ms) | p99 (ms) | Error rate |
-|-------------------|-----------|---------|---------|-----------|
-| 1 | 32 | 25 | 28 | 0% ✅ |
-| 5 | 72 | 61 | 75 | 0% ✅ |
-| 10 | 101 | 89 | 108 | 0% ✅ |
-| 20 | 120 | 162 | 199 | 0% ✅ |
-| **50** | **118** | **410** | **472** | **0% ✅** |
-| 100 | 128 | 790 | 903 | 0% ⚠️ |
-| 150 | 147 | 1021 | 1170 | 0% ⚠️ |
-| 200 | 145 | 1388 | 1589 | 0% ⚠️ |
-| 300 | 151 | 1889 | 2150 | 0% ⚠️ |
-
-**Sweet spot: 20–50 concurrent senders** → ~120 RPS, p99 < 500ms.
-
-Throughput plateaus at ~150 RPS regardless of workers — bottleneck is Kafka
-producer throughput and Spring MVC thread pool, not connection count.
+1. Start all services
+2. Start fake-generator
+3. Watch trades enter Kafka
+4. Verify raw data stored in MySQL
+5. Verify ETL jobs processed
+6. Call report-service API
+7. Observe Redis cache behavior
+8. Stop generator / change speed / retry failed jobs
 
 ---
 
-### Kafka `market.trades` topic
+## 18. Ideal Use Cases for This Project
 
-Steady-state throughput test, 45s per level. Consumer group: `raw-consumer-group`.
+This project is suitable for demonstrating:
 
-| Senders | Produced | Consumed | Produce RPS | Consume RPS | Lag |
-|--------|---------|---------|------------|------------|-----|
-| 10 | 6,080 | 6,080 | 135 | 135 | 0 ✅ |
-| 50 | 7,303 | 7,303 | 162 | 162 | 0 ✅ |
-| 100 | 6,228 | 6,228 | 138 | 138 | 0 ✅ |
-| 200 | 7,466 | 7,466 | 166 | 166 | 0 ✅ |
-| 400 | 6,488 | 6,488 | 144 | 144 | 0 ✅ |
-| 600 | 7,403 | 7,403 | 165 | 165 | 0 ✅ |
-
-**Kafka + Raw Consumer are not the bottleneck.** Lag stays at 0 across all load
-levels. Stable throughput ~130–165 msg/s with `batch-size=200`, `concurrency=3`.
+- backend engineering skills
+- event-driven architecture
+- data pipeline fundamentals
+- Kafka / RabbitMQ integration
+- ETL concepts
+- Redis caching
+- Spring Boot microservices
 
 ---
 
-### ETL Worker `:8084`
+## 19. Interview Summary
 
-End-to-end pipeline test: ingest event → visible in `fact_market_1m`.
+This is not just a CRUD application.
 
-| Stage | Target RPS | Kafka lag | RabbitMQ backlog | ETL avg (ms) | E2E latency (avg) |
-|-------|-----------|----------|----------------|------------|-----------------|
-| LOW   | 20 rps | 0–5 | 0 ✅ | ~11 ms | ~1,341 ms |
-| MID   | 100 rps | 13–24 | 0 ✅ | ~13 ms | ~1,874 ms |
-| HIGH  | 300 rps | 0 | 1,633 ⚠️ | ~17 ms | ~4,809 ms |
+It demonstrates:
 
-**ETL sweet spot: ≤ 80 staging jobs/s** (corresponds to ~100 raw events/s with
-deduplication). Above this threshold, `etl.staging` backlog starts accumulating.
+- ingestion
+- streaming
+- persistence
+- asynchronous processing
+- ETL transformation
+- data warehousing
+- reporting
+- caching
+- API security
 
-RabbitMQ observe results (120s real-time monitoring at mixed load):
-
-| Time window | Queue behavior | out_rate | Status |
-|------------|---------------|---------|--------|
-| 23:05:18–23:06:24 | ready=0 stable | ≈ in_rate | ✅ healthy |
-| 23:06:28–23:06:51 | brief spikes, self-recovers | 33–52/s | ⚠️ warning |
-| 23:06:48–23:07:15 | backlog 382→768, no recovery | 21–25/s | ❌ overload |
-
-ETL overload trigger: sustained `in_rate > 80 msg/s` for more than ~15s.
-Root cause: `setConcurrentConsumers=2` limits throughput to `2 × (1000ms / 17ms) ≈ 117 jobs/s`
-theoretical, but actual DB contention (HikariCP pool=10, 4 queries/job) caps it at ~70–80 jobs/s.
+That makes it a strong portfolio project for backend and data-platform-oriented roles.
 
 ---
 
-### Report Service `:8085`
+## 20. Author Notes
 
-Ramp test from 1 → 400 workers, 20s per level. Mix: 50% cache-hit / 50% DB query.
-
-| Workers | RPS | Cache hit p95 (ms) | Cache hit p99 (ms) |
-|--------|-----|------------------|------------------|
-| 1 | 30 | 49 | 58 | 
-| 5 | 48 | 55 | 67 |
-| 10 | 70 | 87 | 108 |
-| **20** | **82** | **170** | **198** |
-| 50 | 97 | 413 | 554 |
-| 100 | 96 | 847 | 1,369 |
-| 200 | 93 | 2,170 | 2,881 |
-| 300 | 108 | 2,261 | 3,555 |
-| 400 | 125 | 2,491 | 3,175 |
-
-**Sweet spot: ≤ 20 concurrent API clients** → p99 < 200ms on cached queries.
-
-Redis hit ratio: **99.9%** (14,975 hits / 11 misses) — preload on startup works.
-Cache TTL: 60s. Cache invalidation triggered by ETL via `cache.invalidate` queue.
-
----
-
-### Recommended operating parameters
-
-Based on load test results, the following settings keep all services within
-healthy thresholds simultaneously:
-
-| Parameter | Current | Recommended | Location |
-|-----------|---------|-------------|----------|
-| Generator interval | 500ms | **50–100ms** (10–20 rps) | `docker-compose.yml` |
-| Kafka partitions | 3 | 3 (sufficient) | `docker-compose.yml` |
-| Raw consumer batch-size | 200 | 200 (sufficient) | `raw-consumer/application.yml` |
-| Raw consumer concurrency | 3 | 3 (sufficient) | `KafkaConsumerConfig.java` |
-| ETL `setConcurrentConsumers` | 2 | **8** | `RabbitMQConfig.java` |
-| ETL `maxConcurrentConsumers` | 5 | **15** | `RabbitMQConfig.java` |
-| ETL HikariCP pool size | 10 | **20** | `etl-worker/application.yml` |
-| Redis TTL | 60s | 60s (sufficient) | `report-service/application.yml` |
-
-Applying the ETL concurrency fix raises ETL throughput from ~70 jobs/s to
-~350 jobs/s (theoretical), which keeps `etl.staging` backlog at 0 up to ~300 rps ingest load.
-
----
-
-## Project Structure
-
-```
-market-pipeline/
-├── docker-compose.yml
-├── init/
-│   └── mysql/
-│       └── 01-init.sql          # Schema + seed data
-├── fake-generator/              # Spring Boot :8081
-├── ingest-service/              # Spring Boot :8080
-├── raw-consumer/                # Spring Boot :8082
-├── etl-worker/                  # Spring Boot :8084
-└── report-service/              # Spring Boot :8085
-```
-
-Each service follows the standard Spring Boot Maven structure:
-```
-service/
-├── Dockerfile
-├── pom.xml
-└── src/main/
-    ├── java/com/market/...
-    └── resources/application.yml
-```
-
----
-
-## License
-
-MIT
+This project is a strong foundation for discussing:
+- distributed systems basics
+- message-driven design
+- operational reliability
+- analytics architecture
+- scalability tradeoffs
